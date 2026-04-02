@@ -29,7 +29,7 @@ FoldAlpha Engineering \\
 \maketitle
 
 \begin{abstract}
-We describe the redesign of a production financial analysis runtime from a domain-hardcoded planner architecture to a lightweight single-loop agent, informed by architectural patterns observed in commercial coding agents (Claude Code, Codex CLI, Cursor, Windsurf).
+We describe the redesign of the agent runtime powering FoldAlpha (\url{https://app.foldalpha.com}), a production financial analysis service, from a domain-hardcoded planner architecture to a lightweight single-loop agent, informed by architectural patterns observed in commercial coding agents (Claude Code, Codex CLI, Cursor, Windsurf).
 The legacy system relied on regex-based intent classification, per-turn full-state serialization, and hardcoded loop-control heuristics --- an approach that delivered functional results but diverged fundamentally from how modern agent systems are built.
 The redesigned runtime adopts a minimal single-loop architecture with three key design choices: system-prompt-level context pre-loading, a reduced tool surface, and lightweight failure recovery.
 In head-to-head evaluation across 6 single-turn queries and 11 multi-turn conversation turns, the new architecture achieves 2.4$\times$ lower average latency (12.7s vs.\ 30.0s), 100\% vs.\ 91\% success rate, and eliminates catastrophic loop failures observed in the legacy system.
@@ -42,7 +42,7 @@ We argue that for domain-specific agents, \emph{context density at the system pr
 The emergence of LLM-powered coding agents --- Claude Code~\cite{claudecodeleak2026}, OpenAI Codex CLI~\cite{codexcli2025}, Cursor~\cite{cursorprompt2025}, Windsurf~\cite{windsurfprompt2024}, and Devin~\cite{devin2025} --- has established a new paradigm for autonomous tool-using systems.
 A growing body of evidence suggests that the \emph{harness} (the orchestration layer surrounding the LLM) is where the competitive differentiation lies, not the underlying model itself~\cite{effectiveharnesses2025}.
 
-Our team operates a production financial analysis service where users ask natural-language questions and receive data-grounded answers backed by SQL queries, news retrieval, and portfolio analysis.
+Our team operates FoldAlpha (\url{https://app.foldalpha.com}), a production financial analysis service where users ask natural-language questions and receive data-grounded answers backed by SQL queries, news retrieval, and portfolio analysis.
 The legacy production system was built as a \textbf{domain-hardcoded planner}: a multi-step loop with regex-based intent classification, explicit completion checklists, and per-turn full-state serialization.
 While functional, this architecture had grown increasingly difficult to maintain and extend, and its design bore little resemblance to the patterns emerging in successful commercial agents.
 
