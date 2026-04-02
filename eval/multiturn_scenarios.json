@@ -1,0 +1,37 @@
+[
+  {
+    "id": "samsung_followup",
+    "name": "삼성전자 실적 → 후속질문",
+    "turns": [
+      {"question": "삼성전자 최근 실적 알려줘"},
+      {"question": "영업이익률 추이도 보여줘"},
+      {"question": "SK하이닉스랑 비교하면 어때?"}
+    ]
+  },
+  {
+    "id": "nvda_deep_dive",
+    "name": "엔비디아 스냅샷 → 심화",
+    "turns": [
+      {"question": "엔비디아 스냅샷 정리해줘"},
+      {"question": "최근 5년 매출 성장률은?"},
+      {"question": "뉴스도 같이 정리해줘"}
+    ]
+  },
+  {
+    "id": "screening_then_detail",
+    "name": "스크리닝 → 상세 조회",
+    "turns": [
+      {"question": "PBR 1배 이하이면서 영업이익 증가하는 코스피 종목 보여줘"},
+      {"question": "그 중에서 1위 종목 실적 자세히 보여줘"}
+    ]
+  },
+  {
+    "id": "portfolio_analysis",
+    "name": "비교 → 후속",
+    "turns": [
+      {"question": "현대차와 기아를 실적과 밸류 기준으로 비교해줘"},
+      {"question": "최근 주가 수익률도 비교해줘"},
+      {"question": "둘 중에 어디가 더 저평가야?"}
+    ]
+  }
+]

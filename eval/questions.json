@@ -1,0 +1,26 @@
+[
+  {
+    "id": "news_nvda",
+    "family": "news",
+    "question": "엔비디아 최근 뉴스 정리해줘",
+    "notes": "뉴스 검색 중심 질문"
+  },
+  {
+    "id": "snapshot_nvda",
+    "family": "snapshot",
+    "question": "엔비디아 스냅샷 정리해줘",
+    "notes": "단일 종목 개요 질문"
+  },
+  {
+    "id": "comparison_hyundai_kia",
+    "family": "comparison",
+    "question": "현대차와 기아를 실적과 밸류 기준으로 비교해줘",
+    "notes": "개별 종목 비교 질문"
+  },
+  {
+    "id": "screening_kospi_growth_value",
+    "family": "screening",
+    "question": "최근 5년 영업이익 CAGR이 높고 PBR이 낮은 코스피 종목 보여줘",
+    "notes": "스크리닝 품질 확인 질문"
+  }
+]
