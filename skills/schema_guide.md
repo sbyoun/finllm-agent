@@ -148,6 +148,7 @@ join daily_prices p on p.stock_id = s.id
 
 - wide table로 가정하지 않는다.
 - line item은 `financial_accounts` 또는 알려진 `account_id`로 해석한다.
+- `financial_accounts` 테이블의 컬럼은 `id`, `account_name`, `account_type`, `created_at`이다. `name` 컬럼은 존재하지 않는다. 반드시 `account_name`을 사용한다.
 - `quarter = 0`을 canonical annual 값으로 가정하지 않는다.
 - latest period는 stock/account별로 SQL로 찾는다.
 
@@ -173,6 +174,17 @@ join daily_prices p on p.stock_id = s.id
 - `6606 total_aset`: 총자산
 - `6609 total_lblt`: 총부채
 - `6613 total_cptl`: 자기자본
+
+## KR 배당 관련 account id
+
+- `254 ratios_DPS`: 주당배당금 (DPS)
+- `261 ratios_배당성향`: 배당성향
+
+## US 배당 관련 account id
+
+- `156`: Dividend Per Share
+- `157`: Dividend Growth
+- `11853`: Dividends Per Share
 
 ## US 주요 account id
 
