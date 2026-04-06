@@ -603,7 +603,7 @@ def run_agent_request(
     request: RuntimeAgentRequest,
     *,
     on_event: EventCallback | None = None,
-    repo_root: str | Path = "/home/ubuntu/financial-agent-runtime-py",
+    repo_root: str | Path = str(Path(__file__).resolve().parent.parent.parent),
 ) -> RuntimeAgentResult:
     """Single runtime entrypoint used by CLI scripts and FastAPI wrappers."""
     load_env(Path(repo_root) / ".env")
@@ -701,7 +701,7 @@ def run_agent_request_json(
     request: RuntimeAgentRequest,
     *,
     on_event: EventCallback | None = None,
-    repo_root: str | Path = "/home/ubuntu/financial-agent-runtime-py",
+    repo_root: str | Path = str(Path(__file__).resolve().parent.parent.parent),
 ) -> dict[str, Any]:
     result = run_agent_request(request, on_event=on_event, repo_root=repo_root)
     return asdict(result)
