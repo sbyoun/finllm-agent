@@ -357,6 +357,9 @@ class RunBacktestObservation(Observation):
     total_return_pct: float = 0.0
     excess_return_pct: float = 0.0
     period_count: int = 0
+    columns: list = field(default_factory=list)
+    rows: list = field(default_factory=list)
+    row_count: int = 0
 
     def to_text(self) -> str:
         if self.success:
@@ -425,6 +428,27 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
         f"과거 수익률이 미래 수익률을 보장하지 않습니다."
     )
 
+    # Build dataset rows for data panel display
+    period_rows = results.get("period_returns", [])
+    eq_curve = results.get("equity_curve", [])
+
+    # Merge equity curve into period returns for a combined view
+    display_rows = []
+    for i, pr in enumerate(period_rows):
+        row = {
+            "period": pr["period"],
+            "return_pct": pr["return_pct"],
+            "benchmark_pct": pr["benchmark_pct"],
+            "excess_pct": round(pr["return_pct"] - pr["benchmark_pct"], 2),
+            "holdings": pr["holdings"],
+        }
+        if i < len(eq_curve):
+            row["portfolio_value"] = eq_curve[i]["portfolio"]
+            row["benchmark_value"] = eq_curve[i]["benchmark"]
+        display_rows.append(row)
+
+    display_columns = ["period", "return_pct", "benchmark_pct", "excess_pct", "holdings", "portfolio_value", "benchmark_value"]
+
     return RunBacktestObservation(
         success=True,
         summary=summary,
@@ -432,7 +456,10 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
         mdd_pct=results["mdd_pct"],
         total_return_pct=results["total_return_pct"],
         excess_return_pct=results["excess_return_pct"],
-        period_count=len(results.get("period_returns", [])),
+        period_count=len(period_rows),
+        columns=display_columns,
+        rows=display_rows,
+        row_count=len(display_rows),
     )
 
 

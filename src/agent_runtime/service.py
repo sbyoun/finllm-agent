@@ -26,7 +26,7 @@ from agent_runtime.tool.portfolio import make_get_portfolio_tool
 from agent_runtime.tool.sql import RunSQLAction, RunSQLObservation, make_run_sql_tool
 from agent_runtime.tool.sql.oracle import OracleSQLRunner
 from agent_runtime.tool.jobs.register_job import make_register_job_tool
-from agent_runtime.tool.backtest.run_backtest import make_run_backtest_tool
+from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation, make_run_backtest_tool
 
 
 EventCallback = Callable[[dict[str, Any]], None]
@@ -437,7 +437,42 @@ def _build_result(
     tool_request = None
     mode = "answer-only"
 
-    if last_sql_action and last_sql_observation and last_sql_observation.row_count >= 0:
+    # Check for backtest observation
+    last_backtest_obs: RunBacktestObservation | None = None
+    for event in run_events:
+        if isinstance(event, ObservationEvent) and isinstance(event.observation, RunBacktestObservation):
+            if event.observation.success:
+                last_backtest_obs = event.observation
+
+    if last_backtest_obs and last_backtest_obs.rows:
+        columns = [
+            RuntimeDataColumn(key="period", label="기간"),
+            RuntimeDataColumn(key="return_pct", label="수익률(%)"),
+            RuntimeDataColumn(key="benchmark_pct", label="벤치마크(%)"),
+            RuntimeDataColumn(key="excess_pct", label="초과수익(%)"),
+            RuntimeDataColumn(key="holdings", label="종목수"),
+            RuntimeDataColumn(key="portfolio_value", label="포트폴리오"),
+            RuntimeDataColumn(key="benchmark_value", label="벤치마크"),
+        ]
+        dataset = RuntimeAnalysisDataset(
+            title="백테스트 분기별 성과",
+            description=last_backtest_obs.summary,
+            columns=columns,
+            rows=last_backtest_obs.rows,
+        )
+        mode = "tool-result"
+        final_message = _strip_markdown_tables(final_message)
+        tool_request = RuntimeToolRequest(
+            kind="backtest",
+            sql="",
+            reason="Backtest completed",
+            display=RuntimeDisplaySpec(
+                type="table",
+                title="백테스트 분기별 성과",
+                preferredColumns=["period", "return_pct", "benchmark_pct", "excess_pct", "holdings"],
+            ),
+        )
+    elif last_sql_action and last_sql_observation and last_sql_observation.row_count >= 0:
         dataset = _build_dataset_from_sql(last_sql_action, last_sql_observation)
         sql = last_sql_action.sql
         mode = "tool-result"
