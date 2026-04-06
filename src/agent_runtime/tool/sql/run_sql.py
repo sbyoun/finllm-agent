@@ -17,6 +17,7 @@ class RunSQLAction(Action):
     sql: str = ""
     title: str | None = None
     description: str | None = None
+    role: str = "final"  # "final" = analysis result for display, "diagnostic" = exploration/schema lookup
 
 
 @dataclass(slots=True)
@@ -24,6 +25,7 @@ class RunSQLObservation(Observation):
     columns: list[str] = field(default_factory=list)
     rows: list[dict] = field(default_factory=list)
     row_count: int = 0
+    role: str = "final"
     preview_limit: int = 100
 
     def to_text(self) -> str:
@@ -44,8 +46,13 @@ class RunSQLTool(ToolDefinition):
             "type": "object",
             "properties": {
                 "sql": {"type": "string", "description": "SQL query to execute"},
-                "title": {"type": "string"},
-                "description": {"type": "string"},
+                "title": {"type": "string", "description": "Title for the result dataset"},
+                "description": {"type": "string", "description": "Description of what this query does"},
+                "role": {
+                    "type": "string",
+                    "enum": ["final", "diagnostic"],
+                    "description": "Use 'final' for analysis results that should be displayed to the user in the data panel. Use 'diagnostic' for schema exploration, account lookups, stock resolution, or any intermediate query not meant for display.",
+                },
             },
             "required": ["sql"],
         }
@@ -59,11 +66,16 @@ def make_run_sql_tool(runner: SQLRunner) -> RunSQLTool:
             columns=columns,
             rows=rows,
             row_count=len(rows),
+            role=action.role,
         )
 
     return RunSQLTool(
         name="run_sql",
-        description="Execute a SQL query and return tabular results.",
+        description=(
+            "Execute a SQL query and return tabular results. "
+            "Set role='final' for analysis results to display in the data panel. "
+            "Set role='diagnostic' for schema exploration, account lookups, or intermediate queries."
+        ),
         action_type=RunSQLAction,
         observation_type=RunSQLObservation,
         executor=_execute,

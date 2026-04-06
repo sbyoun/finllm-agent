@@ -421,20 +421,9 @@ def _build_result(
         elif isinstance(event, ObservationEvent):
             if isinstance(event.observation, RunSQLObservation):
                 obs = event.observation
-                # Skip metadata/exploration lookups
-                meta_column_sets = [
-                    {"id", "account_name", "account_type", "created_at"},  # financial_accounts
-                    {"id", "account_name", "account_type"},
-                    {"id", "ticker", "name", "country", "market"},  # stocks listing
-                    {"id", "ticker", "name", "market"},
-                    {"column_name"},
-                ]
-                obs_cols = set(obs.columns) if obs.columns else set()
-                is_meta_query = any(obs_cols <= meta_cols for meta_cols in meta_column_sets if obs_cols)
-                if not is_meta_query:
-                    if last_sql_observation is None or obs.row_count >= last_sql_observation.row_count:
-                        last_sql_observation = obs
-                        last_sql_action = pending_sql_action
+                if obs.role == "final":
+                    last_sql_observation = obs
+                    last_sql_action = pending_sql_action
             elif isinstance(event.observation, SearchNewsObservation):
                 execution_log.append(f"news_rows:{len(event.observation.rows)}")
         elif isinstance(event, AgentErrorEvent):
