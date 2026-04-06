@@ -235,7 +235,69 @@ def _build_agent(*, repo_root: Path, llm_config: RuntimeLlmConfig | None) -> Age
     )
 
 
-def _hydrate_history(conversation: LocalConversation, history: list[RuntimeMessageContext]) -> None:
+MAX_HISTORY_CHARS = 40_000  # ~10K tokens, well within context limits
+RECENT_KEEP = 6  # keep last 6 messages (3 turns) intact after compaction
+
+
+def _estimate_history_chars(history: list[RuntimeMessageContext]) -> int:
+    return sum(len(item.content) for item in history)
+
+
+def _compact_history(
+    history: list[RuntimeMessageContext],
+    llm: object,
+) -> list[RuntimeMessageContext]:
+    """Compact long history: summarize older messages, keep recent ones."""
+    if _estimate_history_chars(history) <= MAX_HISTORY_CHARS:
+        return history
+
+    recent = history[-RECENT_KEEP:] if len(history) > RECENT_KEEP else history
+    older = history[:-RECENT_KEEP] if len(history) > RECENT_KEEP else []
+
+    if not older:
+        return history
+
+    # Build summary of older messages
+    lines = []
+    for item in older:
+        role_label = "User" if item.role == "user" else "Assistant"
+        content_preview = item.content[:500]
+        lines.append(f"{role_label}: {content_preview}")
+
+    summary_prompt = (
+        "Summarize the following conversation history concisely. "
+        "Preserve: user goals, key findings, data points mentioned, "
+        "unresolved questions, and important context for follow-up.\n\n"
+        + "\n\n".join(lines)
+    )
+
+    try:
+        response = llm.completion(
+            messages=[
+                {"role": "system", "content": "You compress conversation history. Keep only durable facts and context."},
+                {"role": "user", "content": summary_prompt},
+            ],
+            tools=None,
+        )
+        summary_text = response.message.content.strip()
+    except Exception:
+        # Fallback: just take last N lines
+        summary_text = "\n".join(
+            f"- {item.role}: {item.content[:200]}" for item in older[-6:]
+        )
+
+    summary_message = RuntimeMessageContext(
+        role="assistant",
+        content=f"[Previous conversation summary]\n{summary_text}",
+    )
+
+    return [summary_message] + recent
+
+
+def _hydrate_history(
+    conversation: LocalConversation,
+    history: list[RuntimeMessageContext],
+) -> None:
     for item in history:
         conversation.state.event_log.append(
             MessageEvent(
@@ -516,7 +578,8 @@ def run_agent_request(
         conversation.state.set_agent_state("user_id", request.user_id)
     if request.session_id:
         conversation.state.set_agent_state("session_id", request.session_id)
-    _hydrate_history(conversation, request.history)
+    compacted_history = _compact_history(request.history, agent.llm)
+    _hydrate_history(conversation, compacted_history)
     conversation.send_message(request.question)
     run_start_index = len(conversation.state.event_log) - 1
 
