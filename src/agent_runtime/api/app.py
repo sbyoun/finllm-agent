@@ -33,7 +33,7 @@ class RunRequestModel(BaseModel):
     history: list[MessageContextModel] = Field(default_factory=list)
     stateSnapshot: dict[str, Any] = Field(default_factory=dict)
     llmConfig: LlmConfigModel | None = None
-    maxIterations: int = 8
+    maxIterations: int = 25
 
 
 def _to_runtime_request(body: RunRequestModel) -> RuntimeAgentRequest:
