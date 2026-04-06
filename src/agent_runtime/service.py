@@ -26,6 +26,7 @@ from agent_runtime.tool.portfolio import make_get_portfolio_tool
 from agent_runtime.tool.sql import RunSQLAction, RunSQLObservation, make_run_sql_tool
 from agent_runtime.tool.sql.oracle import OracleSQLRunner
 from agent_runtime.tool.jobs.register_job import make_register_job_tool
+from agent_runtime.tool.backtest.run_backtest import make_run_backtest_tool
 
 
 EventCallback = Callable[[dict[str, Any]], None]
@@ -219,6 +220,7 @@ def _build_tools(*, repo_root: Path):
         make_search_news_tool(),
         make_run_sql_tool(OracleSQLRunner()),
         make_register_job_tool(),
+        make_run_backtest_tool(),
     ]
 
 
