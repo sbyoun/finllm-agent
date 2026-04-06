@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_ROOT="/home/ubuntu/financial-agent-runtime-py"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="/home/ubuntu/alpha-engine/.venv/bin/python"
 APP_MODULE="agent_runtime.api.app:app"
 ENV_FILE="${ENV_FILE:-.env}"

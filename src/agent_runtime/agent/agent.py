@@ -14,7 +14,6 @@ from agent_runtime.event.observation import AgentErrorEvent, ObservationEvent
 from agent_runtime.llm.client import LLMToolCall, Message
 from agent_runtime.tool.news.search_news import SearchNewsAction, SearchNewsObservation
 from agent_runtime.tool.portfolio.get_portfolio import GetPortfolioObservation
-from agent_runtime.tool.skills.load_skill import LoadSkillAction, LoadSkillObservation
 from agent_runtime.tool.sql.run_sql import RunSQLAction, RunSQLObservation
 
 
@@ -118,9 +117,7 @@ class Agent(AgentBase):
     ) -> dict[str, Any]:
         summary: dict[str, Any] = {"tool": tool_name}
 
-        if isinstance(action, LoadSkillAction):
-            summary["skill_name"] = action.skill_name
-        elif isinstance(action, RunSQLAction):
+        if isinstance(action, RunSQLAction):
             summary["sql"] = action.sql
             if action.title:
                 summary["title"] = action.title
@@ -133,8 +130,6 @@ class Agent(AgentBase):
         elif isinstance(observation, SearchNewsObservation):
             summary["row_count"] = len(observation.rows)
             summary["preview_rows"] = observation.rows[:3]
-        elif isinstance(observation, LoadSkillObservation):
-            summary["skill_name"] = observation.skill_name
         elif isinstance(observation, GetPortfolioObservation):
             summary["row_count"] = len(observation.rows)
             summary["rows"] = observation.rows[:10]
@@ -226,13 +221,6 @@ class Agent(AgentBase):
             tool_name=tool_name,
             summary=observation_summary,
         )
-
-        if tool_name == "load_skill" and isinstance(action, LoadSkillAction) and isinstance(observation, LoadSkillObservation):
-            loaded_skills = list(state.get_agent_state("loaded_skills", []))
-            if action.skill_name not in loaded_skills:
-                loaded_skills.append(action.skill_name)
-            state.set_agent_state("loaded_skills", loaded_skills)
-            return
 
         if tool_name == "run_sql" and isinstance(action, RunSQLAction) and isinstance(observation, RunSQLObservation):
             state.set_agent_state(

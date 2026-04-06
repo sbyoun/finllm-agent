@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_runtime.tool.tool import ToolDefinition
@@ -34,7 +35,13 @@ def build_tool_inventory(*, tools: list[ToolDefinition]) -> str:
 
 
 def build_system_prompt(*, tools: list[ToolDefinition], repo_root: str | Path) -> str:
+    from datetime import timedelta
+    kst = timezone(timedelta(hours=9))
+    now_kst = datetime.now(kst)
+    today = now_kst.strftime("%Y-%m-%d")
+    time_kst = now_kst.strftime("%H:%M")
     parts = [
+        f"Today: {today} KST (UTC+9), current time: {time_kst} KST. When scheduling jobs, convert user's time to UTC for cron expressions (e.g., '아침 9시' KST = '0 0 * * *' UTC).",
         load_system_prompt(),
         build_tool_inventory(tools=tools),
     ]
