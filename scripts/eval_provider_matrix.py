@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,14 @@ from agent_runtime.llm.factory import RuntimeLlmConfig
 from agent_runtime.service import RuntimeAgentRequest, run_agent_request
 
 
-REPO_ROOT = Path("/home/ubuntu/financial-agent-runtime-py")
+def resolve_repo_root() -> Path:
+    configured = os.getenv("AGENT_REPO_ROOT") or os.getenv("APP_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path(__file__).resolve().parent.parent
+
+
+REPO_ROOT = resolve_repo_root()
 DEFAULT_QUESTIONS_PATH = REPO_ROOT / "eval" / "questions.json"
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
 

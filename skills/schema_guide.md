@@ -149,6 +149,10 @@ join daily_prices p on p.stock_id = s.id
 - wide table로 가정하지 않는다.
 - line item은 `financial_accounts` 또는 알려진 `account_id`로 해석한다.
 - `financial_accounts` 테이블의 컬럼은 `id`, `account_name`, `account_type`, `created_at`이다. `name` 컬럼은 존재하지 않는다. 반드시 `account_name`을 사용한다.
+- account 선택은 아래의 시장별 full account id list를 authoritative source로 사용한다.
+- KR 질문이면 `kis_kr` full list 안에서만 고른다.
+- US 질문이면 `stockanalysis` full list 안에서만 고른다.
+- 사용자가 schema 탐색 자체를 요청한 경우가 아니면 `financial_accounts`를 `account_name like '%...%'`로 fuzzy 검색해서 metric을 찾지 않는다.
 - `quarter = 0`을 canonical annual 값으로 가정하지 않는다.
 - latest period는 stock/account별로 SQL로 찾는다.
 
@@ -158,48 +162,331 @@ join daily_prices p on p.stock_id = s.id
 - 일부 계열에서 `0`이 보여도 표준 annual 값이라고 단정하지 않는다.
 - comparable period가 필요하면 같은 quarter를 맞춰서 비교한다.
 
-## KR 주요 account id
+## KR full account id list
 
-- `6592 sale_account`: 매출액
-- `6597 bsop_prti`: 영업이익
-- `6603 thtr_ntin`: 순이익
-- `6579 roe_val`: ROE
-- `6580 eps`: EPS
-- `6581 sps`: SPS
-- `6582 bps`: BPS
-- `6584 lblt_rate`: 부채비율
-- `6590 ebitda`: EBITDA
-- `6591 ev_ebitda`: EV/EBITDA
-- `6594 sale_totl_prfi`: 매출총이익
-- `6606 total_aset`: 총자산
-- `6609 total_lblt`: 총부채
-- `6613 total_cptl`: 자기자본
+KR financial metric은 `financial_accounts.account_type = 'kis_kr'`만 기준으로 본다.
 
-## KR 배당 관련 account id
+- `6576 grs`
+- `6577 bsop_prfi_inrt`
+- `6578 ntin_inrt`
+- `6579 roe_val`
+- `6580 eps`
+- `6581 sps`
+- `6582 bps`
+- `6583 rsrv_rate`
+- `6584 lblt_rate`
+- `6585 bram_depn`
+- `6586 crnt_rate`
+- `6587 quck_rate`
+- `6588 payout_rate`
+- `6589 eva`
+- `6590 ebitda`
+- `6591 ev_ebitda`
+- `6592 sale_account`
+- `6593 sale_cost`
+- `6594 sale_totl_prfi`
+- `6595 depr_cost`
+- `6596 sell_mang`
+- `6597 bsop_prti`
+- `6598 bsop_non_ernn`
+- `6599 bsop_non_expn`
+- `6600 op_prfi`
+- `6601 spec_prfi`
+- `6602 spec_loss`
+- `6603 thtr_ntin`
+- `6604 cras`
+- `6605 fxas`
+- `6606 total_aset`
+- `6607 flow_lblt`
+- `6608 fix_lblt`
+- `6609 total_lblt`
+- `6610 cpfn`
+- `6611 cfp_surp`
+- `6612 prfi_surp`
+- `6613 total_cptl`
+- `6614 cptl_ntin_rate`
+- `6615 self_cptl_ntin_inrt`
+- `6616 sale_ntin_rate`
+- `6617 sale_totl_rate`
+- `6618 equt_inrt`
+- `6619 totl_aset_inrt`
 
-- `254 ratios_DPS`: 주당배당금 (DPS)
-- `261 ratios_배당성향`: 배당성향
+## US full account id list
 
-## US 배당 관련 account id
+US financial metric은 `financial_accounts.account_type = 'stockanalysis'`만 기준으로 본다.
 
-- `156`: Dividend Per Share
-- `157`: Dividend Growth
-- `11853`: Dividends Per Share
-
-## US 주요 account id
-
-- `131`: Revenue
-- `138`: Operating Income
-- `145`: Net Income
-- `151`: EPS (Basic)
-- `152`: EPS (Diluted)
-- `162`: EBITDA
-- `183`: Total Assets
-- `196`: Total Liabilities
-- `200`: Shareholders' Equity
-- `202`: Total Debt
-- `209`: Book Value Per Share
-- `223`: Operating Cash Flow
+- `131 Revenue`
+- `132 Revenue Growth (YoY)`
+- `133 Cost of Revenue`
+- `134 Gross Profit`
+- `135 Selling, General & Admin`
+- `136 Research & Development`
+- `137 Operating Expenses`
+- `138 Operating Income`
+- `139 Interest Expense`
+- `140 Interest & Investment Income`
+- `141 Other Non Operating Income (Expenses)`
+- `142 EBT Excluding Unusual Items`
+- `143 Pretax Income`
+- `144 Income Tax Expense`
+- `145 Net Income`
+- `146 Net Income to Common`
+- `147 Net Income Growth`
+- `148 Shares Outstanding (Basic)`
+- `149 Shares Outstanding (Diluted)`
+- `150 Shares Change (YoY)`
+- `151 EPS (Basic)`
+- `152 EPS (Diluted)`
+- `153 EPS Growth`
+- `154 Free Cash Flow`
+- `155 Free Cash Flow Per Share`
+- `156 Dividend Per Share`
+- `157 Dividend Growth`
+- `158 Gross Margin`
+- `159 Operating Margin`
+- `160 Profit Margin`
+- `161 Free Cash Flow Margin`
+- `162 EBITDA`
+- `163 EBITDA Margin`
+- `164 D&A For EBITDA`
+- `165 EBIT`
+- `166 EBIT Margin`
+- `167 Effective Tax Rate`
+- `168 Revenue as Reported`
+- `169 Cash & Equivalents`
+- `170 Short-Term Investments`
+- `171 Cash & Short-Term Investments`
+- `172 Cash Growth`
+- `173 Accounts Receivable`
+- `174 Other Receivables`
+- `175 Receivables`
+- `176 Inventory`
+- `177 Other Current Assets`
+- `178 Total Current Assets`
+- `179 Property, Plant & Equipment`
+- `180 Long-Term Investments`
+- `181 Long-Term Deferred Tax Assets`
+- `182 Other Long-Term Assets`
+- `183 Total Assets`
+- `184 Accounts Payable`
+- `185 Accrued Expenses`
+- `186 Short-Term Debt`
+- `187 Current Portion of Long-Term Debt`
+- `188 Current Portion of Leases`
+- `189 Current Income Taxes Payable`
+- `190 Current Unearned Revenue`
+- `191 Other Current Liabilities`
+- `192 Total Current Liabilities`
+- `193 Long-Term Debt`
+- `194 Long-Term Leases`
+- `195 Other Long-Term Liabilities`
+- `196 Total Liabilities`
+- `197 Common Stock`
+- `198 Retained Earnings`
+- `199 Comprehensive Income & Other`
+- `200 Shareholders' Equity`
+- `201 Total Liabilities & Equity`
+- `202 Total Debt`
+- `203 Net Cash (Debt)`
+- `204 Net Cash Growth`
+- `205 Net Cash Per Share`
+- `206 Filing Date Shares Outstanding`
+- `207 Total Common Shares Outstanding`
+- `208 Working Capital`
+- `209 Book Value Per Share`
+- `210 Tangible Book Value`
+- `211 Tangible Book Value Per Share`
+- `212 Land`
+- `213 Machinery`
+- `214 Leasehold Improvements`
+- `215 Depreciation & Amortization`
+- `216 Stock-Based Compensation`
+- `217 Other Operating Activities`
+- `218 Change in Accounts Receivable`
+- `219 Change in Inventory`
+- `220 Change in Accounts Payable`
+- `221 Change in Unearned Revenue`
+- `222 Change in Other Net Operating Assets`
+- `223 Operating Cash Flow`
+- `224 Operating Cash Flow Growth`
+- `225 Capital Expenditures`
+- `226 Cash Acquisitions`
+- `227 Investment in Securities`
+- `228 Other Investing Activities`
+- `229 Investing Cash Flow`
+- `230 Total Debt Issued`
+- `231 Short-Term Debt Repaid`
+- `232 Long-Term Debt Repaid`
+- `233 Total Debt Repaid`
+- `234 Net Debt Issued (Repaid)`
+- `235 Repurchase of Common Stock`
+- `236 Common Dividends Paid`
+- `237 Other Financing Activities`
+- `238 Financing Cash Flow`
+- `239 Net Cash Flow`
+- `240 Free Cash Flow Growth`
+- `241 Cash Interest Paid`
+- `242 Cash Income Tax Paid`
+- `243 Levered Free Cash Flow`
+- `244 Unlevered Free Cash Flow`
+- `245 Change in Working Capital`
+- `11342 Issuance of Common Stock`
+- `11343 Other Intangible Assets`
+- `11344 Total Common Equity`
+- `11345 Other Unusual Items`
+- `11346 Prepaid Expenses`
+- `11347 Long-Term Deferred Tax Liabilities`
+- `11348 Merger & Restructuring Charges`
+- `11349 Change in Income Taxes`
+- `11350 Additional Paid-In Capital`
+- `11351 Goodwill`
+- `11352 Restricted Cash`
+- `11353 Currency Exchange Gain (Loss)`
+- `11354 Other Amortization`
+- `11355 Long-Term Debt Issued`
+- `11356 Foreign Exchange Rate Adjustments`
+- `11357 Provision & Write-off of Bad Debts`
+- `11555 Treasury Stock`
+- `11556 Asset Writedown`
+- `11557 Finance Div. Debt Long-Term`
+- `11558 Divestitures`
+- `11559 Earnings From Discontinued Operations`
+- `11560 Net Income to Company`
+- `11561 Earnings From Equity Investments`
+- `11562 Long-Term Deferred Charges`
+- `11563 Buildings`
+- `11564 Asset Writedown & Restructuring Costs`
+- `11565 Dividends Paid`
+- `11566 Sale (Purchase) of Intangibles`
+- `11567 Short-Term Debt Issued`
+- `11568 Finance Div. Other Current Assets`
+- `11569 Finance Div. Other Long-Term Liabilities`
+- `11570 Finance Div. Debt Current`
+- `11571 Long-Term Unearned Revenue`
+- `11572 Operating Revenue`
+- `11573 Minority Interest in Earnings`
+- `11574 Earnings From Continuing Operations`
+- `11575 Loss (Gain) From Sale of Assets`
+- `11576 Sale of Property, Plant & Equipment`
+- `11577 Preferred Dividends & Other Adjustments`
+- `11578 Finance Div. Other Current Liabilities`
+- `11579 Minority Interest`
+- `11580 Other Revenue`
+- `11581 Miscellaneous Cash Flow Adjustments`
+- `11582 Finance Div. Loans and Leases Long-Term`
+- `11583 Finance Div. Loans and Leases`
+- `11584 Loss (Gain) on Equity Investments`
+- `11585 Gain (Loss) on Sale of Assets`
+- `11586 Impairment of Goodwill`
+- `11587 Loss (Gain) From Sale of Investments`
+- `11588 Sale (Purchase) of Real Estate`
+- `11589 Construction In Progress`
+- `11590 Pension & Post-Retirement Benefits`
+- `11591 Long-Term Accounts Receivable`
+- `11592 Legal Settlements`
+- `11593 Amortization of Goodwill & Intangibles`
+- `11594 Trading Asset Securities`
+- `11595 Advertising Expenses`
+- `11596 Earnings From Continuing Ops.`
+- `11597 Premiums & Annuity Revenue`
+- `11598 Deferred Policy Acquisition Cost`
+- `11599 Total Investments`
+- `11600 Total Revenue`
+- `11601 Change in Insurance Reserves / Liabilities`
+- `11602 Investments in Debt Securities`
+- `11603 Selling, General & Administrative`
+- `11604 Repurchases of Common Stock`
+- `11605 Other Operating Expenses`
+- `11606 Insurance & Annuity Liabilities`
+- `11607 Other Investments`
+- `11608 Unearned Premiums`
+- `11609 Policy Acquisition & Underwriting Costs`
+- `11610 Investments in Equity & Preferred Securities`
+- `11611 Total Interest & Dividend Income`
+- `11612 Policy Loans`
+- `11613 Policy Benefits`
+- `11614 Total Operating Expenses`
+- `11615 Unpaid Claims`
+- `11616 Funds From Operations (FFO)`
+- `11617 Revenue Growth (YoY`
+- `11618 D&A For Ebitda`
+- `11619 Acquisition of Real Estate Assets`
+- `11620 Investment In Debt and Equity Securities`
+- `11621 Net Sale / Acq. of Real Estate Assets`
+- `11622 Sale of Real Estate Assets`
+- `11623 Rental Revenue`
+- `11624 FFO Payout Ratio`
+- `11625 Provision for Loan Losses`
+- `11626 AFFO Per Share`
+- `11627 Adjusted Funds From Operations (AFFO)`
+- `11628 FFO Per Share`
+- `11629 Investment in Marketable & Equity Securities`
+- `11630 Diluted Shares Outstanding`
+- `11631 Loans Receivable Current`
+- `11632 Deferred Long-Term Tax Assets`
+- `11633 Property Expenses`
+- `11634 Total Insurance Settlements`
+- `11635 Other Non-Operating Income`
+- `11636 Basic Shares Outstanding`
+- `11637 Preferred Share Repurchases`
+- `11638 Deferred Long-Term Charges`
+- `11639 Preferred Dividends Paid`
+- `11640 Cash Acquisition`
+- `11641 Total Legal Settlements`
+- `11642 Preferred Stock, Redeemable`
+- `11643 Total Dividends Paid`
+- `11644 Preferred Stock Issued`
+- `11645 Net Cash from Discontinued Operations`
+- `11646 Separate Account Assets`
+- `11647 Separate Account Liability`
+- `11648 Reinsurance Recoverable`
+- `11649 Earnings From Discontinued Ops.`
+- `11650 Order Backlog`
+- `11651 Interest and Dividend Income`
+- `11652 Revenue Before Loan Losses`
+- `11653 Depreciation & Amortization, Total`
+- `11654 Investments in Debt & Equity Securities`
+- `11655 Trading & Principal Transactions`
+- `11656 Brokerage Commission`
+- `11657 Asset Management Fee`
+- `11658 Net Interest Income`
+- `11659 Salaries & Employee Benefits`
+- `11660 Cost of Services Provided`
+- `11661 Total Interest Expense`
+- `11662 Underwriting & Investment Banking Fee`
+- `11663 Distributions in Excess of Earnings`
+- `11664 Total Non-Interest Expense`
+- `11665 Short-Term Borrowings`
+- `11666 Salaries and Employee Benefits`
+- `11667 Total Deposits`
+- `11668 Mortgage-Backed Securities`
+- `11669 Net Increase (Decrease) in Deposit Accounts`
+- `11670 Net Loans`
+- `11671 Total Asset Writedown`
+- `11672 Revenues Before Loan Losses`
+- `11673 Accrued Interest Payable`
+- `11674 Total Interest Income`
+- `11675 Net Decrease (Increase) in Loans Originated / Sold - Operating`
+- `11676 Allowance for Loan Losses`
+- `11677 Federal Home Loan Bank Debt, Long-Term`
+- `11678 Gross Loans`
+- `11679 Occupancy Expenses`
+- `11680 Sale of Property, Plant and Equipment`
+- `11681 Total Non-Interest Income`
+- `11682 Interest Income on Loans`
+- `11683 Interest Bearing Deposits`
+- `11684 Non-Interest Income Growth (YoY)`
+- `11685 Other Non-Interest Income`
+- `11686 Net Decrease (Increase) in Loans Originated / Sold - Investing`
+- `11687 Interest Paid on Deposits`
+- `11688 Investment Securities`
+- `11689 Interest Income on Investments`
+- `11690 Other Real Estate Owned & Foreclosed`
+- `11691 Other Non-Interest Expense`
+- `11692 Trust Preferred Securities`
+- `11693 Loans Held for Sale`
+- `11694 Non-Interest Bearing Deposits`
+- `11695 Interest Paid on Borrowings`
 
 ## KR reliability policy
 

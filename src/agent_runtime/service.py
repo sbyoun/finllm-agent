@@ -145,7 +145,9 @@ class RuntimeAgentResult:
     runId: str
     decision: RuntimePlannerDecision
     dataset: RuntimeAnalysisDataset | None
+    datasets: list[RuntimeAnalysisDataset]
     sql: str | None
+    sqlScripts: list[str]
     metrics: RuntimeExecutionMetrics
     executionLog: list[str]
     events: list[dict[str, Any]]
@@ -395,6 +397,7 @@ def _build_result(
     final_message = ""
     last_sql_action: RunSQLAction | None = None
     last_sql_observation: RunSQLObservation | None = None
+    final_sql_results: list[tuple[RunSQLAction, RunSQLObservation]] = []
     clarification_question: str | None = None
     saw_error = False
     action_count = 0
@@ -424,6 +427,8 @@ def _build_result(
                 if obs.role == "final":
                     last_sql_observation = obs
                     last_sql_action = pending_sql_action
+                    if pending_sql_action is not None:
+                        final_sql_results.append((pending_sql_action, obs))
             elif isinstance(event.observation, SearchNewsObservation):
                 execution_log.append(f"news_rows:{len(event.observation.rows)}")
         elif isinstance(event, AgentErrorEvent):
@@ -437,7 +442,9 @@ def _build_result(
             final_message = _sanitize_assistant_message(event.content)
 
     dataset = None
+    datasets: list[RuntimeAnalysisDataset] = []
     sql = None
+    sql_scripts: list[str] = []
     tool_request = None
     mode = "answer-only"
 
@@ -477,6 +484,8 @@ def _build_result(
             ),
         )
     elif last_sql_action and last_sql_observation and last_sql_observation.row_count >= 0:
+        datasets = [_build_dataset_from_sql(action, observation) for action, observation in final_sql_results]
+        sql_scripts = [action.sql for action, _ in final_sql_results]
         dataset = _build_dataset_from_sql(last_sql_action, last_sql_observation)
         sql = last_sql_action.sql
         mode = "tool-result"
@@ -530,7 +539,9 @@ def _build_result(
         runId=str(uuid4()),
         decision=decision,
         dataset=dataset,
+        datasets=datasets,
         sql=sql,
+        sqlScripts=sql_scripts,
         metrics=metrics,
         executionLog=execution_log,
         events=serialized_events,

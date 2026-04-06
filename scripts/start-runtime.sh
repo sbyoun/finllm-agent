@@ -8,6 +8,8 @@ APP_MODULE="agent_runtime.api.app:app"
 ENV_FILE="${ENV_FILE:-.env}"
 
 cd "$APP_ROOT"
+export APP_ROOT
+export AGENT_REPO_ROOT="${AGENT_REPO_ROOT:-$APP_ROOT}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a

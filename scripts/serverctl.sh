@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_ROOT="/home/ubuntu/financial-agent-runtime-py"
+APP_ROOT="/home/ubuntu/financial-agent-runtime-py-dev"
 TARGET_ENV="production"
 
 if [[ "${1:-}" == "--env" ]]; then

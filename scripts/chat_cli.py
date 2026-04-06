@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import os
 import sys
 from datetime import datetime, UTC
 from pathlib import Path
 
 from agent_runtime.env import load_env
 from agent_runtime.service import RuntimeAgentRequest, RuntimeMessageContext, run_agent_request
+
+
+def resolve_repo_root() -> Path:
+    configured = os.getenv("AGENT_REPO_ROOT") or os.getenv("APP_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path(__file__).resolve().parent.parent
 
 
 def append_turn_log(log_path: Path, question: str, new_events: list[dict], status: str) -> None:
@@ -51,7 +59,7 @@ def print_event(event: dict) -> None:
 
 def main() -> None:
     load_env()
-    repo_root = Path("/home/ubuntu/financial-agent-runtime-py")
+    repo_root = resolve_repo_root()
     history: list[RuntimeMessageContext] = []
     session_started_at = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     log_path = repo_root / "logs" / "chat_cli" / f"session-{session_started_at}.jsonl"

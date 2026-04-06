@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import queue
 import threading
 from pathlib import Path
@@ -57,6 +58,13 @@ def _to_runtime_request(body: RunRequestModel) -> RuntimeAgentRequest:
 app = FastAPI(title="financial-agent-runtime-py")
 
 
+def _resolve_repo_root() -> Path:
+    configured = os.getenv("AGENT_REPO_ROOT") or os.getenv("APP_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path(__file__).resolve().parents[3]
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -71,6 +79,7 @@ def run_sync(body: RunRequestModel) -> JSONResponse:
 @app.post("/runs/stream")
 def run_stream(body: RunRequestModel) -> StreamingResponse:
     request = _to_runtime_request(body)
+    repo_root = _resolve_repo_root()
 
     def generate():
         event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
@@ -84,7 +93,7 @@ def run_stream(body: RunRequestModel) -> StreamingResponse:
                 result_holder["result"] = run_agent_request(
                     request,
                     on_event=on_event,
-                    repo_root=Path("/home/ubuntu/financial-agent-runtime-py"),
+                    repo_root=repo_root,
                 )
             except Exception as exc:  # noqa: BLE001
                 result_holder["error"] = str(exc)
@@ -110,7 +119,9 @@ def run_stream(body: RunRequestModel) -> StreamingResponse:
             "runId": result.runId,
             "decision": dataclasses.asdict(result.decision),
             "dataset": dataclasses.asdict(result.dataset) if result.dataset else None,
+            "datasets": [dataclasses.asdict(item) for item in result.datasets],
             "sql": result.sql,
+            "sqlScripts": result.sqlScripts,
             "metrics": dataclasses.asdict(result.metrics),
             "executionLog": result.executionLog,
             "events": result.events,
