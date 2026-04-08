@@ -94,7 +94,7 @@ def _search_brave_news(action: SearchNewsAction) -> SearchNewsObservation:
 def make_search_news_tool() -> SearchNewsTool:
     return SearchNewsTool(
         name="search_news",
-        description="Search recent news and return structured news rows.",
+        description="Search recent news and return structured news rows. IMPORTANT: call this tool one at a time — do NOT call multiple search_news in parallel. Sequential calls only.",
         action_type=SearchNewsAction,
         observation_type=SearchNewsObservation,
         executor=lambda action, conversation=None: _search_brave_news(action),  # noqa: ARG005

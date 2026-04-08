@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_ROOT="/home/ubuntu/financial-agent-runtime-py-dev"
+APP_ROOT="/home/ubuntu/finllm/dev/runtime-dev"
 RUNTIME_SERVICE_NAME="${RUNTIME_SERVICE_NAME:-financial-agent-runtime-py}"
 RUNTIME_PORT="${RUNTIME_PORT:-8010}"
 
