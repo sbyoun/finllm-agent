@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
@@ -9,6 +11,11 @@ from urllib.request import Request, urlopen
 from agent_runtime.env import require_env
 from agent_runtime.tool.schema import Action, Observation
 from agent_runtime.tool.tool import ToolDefinition
+
+# Brave Search API rate limit guard: enforce minimum interval between calls
+_NEWS_LOCK = threading.Lock()
+_NEWS_MIN_INTERVAL = 2.0  # seconds
+_news_last_called: float = 0.0
 
 
 @dataclass(slots=True)
@@ -50,6 +57,13 @@ class SearchNewsTool(ToolDefinition):
 
 
 def _search_brave_news(action: SearchNewsAction) -> SearchNewsObservation:
+    global _news_last_called
+    with _NEWS_LOCK:
+        elapsed = time.monotonic() - _news_last_called
+        if elapsed < _NEWS_MIN_INTERVAL:
+            time.sleep(_NEWS_MIN_INTERVAL - elapsed)
+        _news_last_called = time.monotonic()
+
     api_key = require_env("BRAVE_SEARCH_API_KEY")
     query = action.query.strip()
     if not query:
