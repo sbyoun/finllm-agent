@@ -3,11 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PYTHON_BIN="/home/ubuntu/alpha-engine/.venv/bin/python"
+PYTHON_BIN="${PYTHON_BIN:-/home/ubuntu/alpha-engine/.venv/bin/python}"
 APP_MODULE="agent_runtime.api.app:app"
 ENV_FILE="${ENV_FILE:-.env}"
 
 cd "$APP_ROOT"
+export APP_ROOT
+export AGENT_REPO_ROOT="${AGENT_REPO_ROOT:-$APP_ROOT}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a

@@ -19,8 +19,10 @@ User question
 
 - **Single-loop, no intent classification.** The LLM autonomously decides the next action at each step. No regex classifiers, completion checklists, or routing heuristics.
 - **System-prompt-level context.** Domain schema (~3K tokens) is injected once into the system prompt, enabling API-level prefix caching across turns.
-- **Minimal tool surface.** Three tools (`run_sql`, `search_news`, `get_portfolio`) instead of 9+ specialized resolvers.
+- **Minimal tool surface.** Five tools (`run_sql`, `search_news`, `get_portfolio`, `run_backtest`, `register_job`) instead of 9+ specialized resolvers.
 - **Lightweight failure recovery.** Empty-response retry, loop detection (3x repeat block), and markdown table stripping.
+- **Long-context compaction.** LLM-based conversation summarization kicks in automatically when history exceeds ~40K characters, retaining the last 6 turns verbatim.
+- **Multi-dataset response.** A single agent run can return multiple datasets (e.g., backtest results + portfolio snapshot).
 
 ## Performance
 
@@ -51,6 +53,8 @@ src/agent_runtime/
     sql/          #   Oracle DB query execution
     news/         #   Brave Search API
     portfolio/    #   Portfolio holdings (Supabase)
+    backtest/     #   Factor strategy backtesting engine
+    jobs/         #   Scheduled job registration (cron + Telegram alerts)
     skills/       #   Skill file loader
   service.py      # Main orchestration, result building
 skills/           # Domain knowledge (schema guide, SQL patterns)
@@ -97,7 +101,7 @@ Server-Sent Events (SSE) streaming. Emits `status`, `tool`, `observation`, `fina
   "history": [{"role": "user|assistant", "content": "string"}],
   "stateSnapshot": {},
   "llmConfig": {"model": "string", "apiKey": "string", "baseUrl": "string"},
-  "maxIterations": 8
+  "maxIterations": 25
 }
 ```
 
@@ -125,6 +129,16 @@ Server-Sent Events (SSE) streaming. Emits `status`, `tool`, `observation`, `fina
   "elapsedMs": 0
 }
 ```
+
+## Tools
+
+| Tool | Description |
+|---|---|
+| `run_sql` | Executes validated SQL against Oracle ADB. Returns structured dataset. |
+| `search_news` | Brave Search API with per-call rate limiting (429 prevention). |
+| `get_portfolio` | Fetches user portfolio holdings from Supabase. |
+| `run_backtest` | Factor strategy backtesting engine. Quarterly rebalancing, 0.3% fee model, CAGR/MDD/Sharpe output. Results archived to DB. |
+| `register_job` | Registers a scheduled job (natural language → cron). Sends results via Telegram. |
 
 ## Evaluation
 

@@ -1,4 +1,8 @@
-"""run_backtest tool: backtest a factor-based strategy using historical data."""
+"""run_backtest tool: backtest a factor-based strategy using historical data.
+
+The agent writes a screening SQL with an {as_of_date} placeholder.
+The engine substitutes the rebalancing date for each period and calculates returns.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from agent_runtime.tool.schema import Action, Observation
@@ -20,8 +23,24 @@ from agent_runtime.tool.sql.oracle import OracleSQLRunner
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
-# Rebalancing quarter start months
-QUARTER_MONTHS = [(1, 1), (4, 1), (7, 1), (10, 1)]
+_KR_UNIVERSES = {"KOSPI", "KOSDAQ"}
+_US_UNIVERSES = {"SP500", "NASDAQ"}
+
+# ---------------------------------------------------------------------------
+# Look-ahead bias: rebalancing schedule per market
+# KR: Apr/Jun/Sep/Dec — based on kr_financial_timing.py publication lags
+# US: Mar/Jun/Sep/Dec — 2-month lag after quarter end (us_model_builder.py)
+# ---------------------------------------------------------------------------
+_KR_REBALANCE_SCHEDULE = [(4,), (6,), (9,), (12,)]
+_US_REBALANCE_SCHEDULE = [(3,), (6,), (9,), (12,)]
+
+
+def _rebalance_schedule(universe: str) -> list[tuple[int]]:
+    return _KR_REBALANCE_SCHEDULE if universe in _KR_UNIVERSES else _US_REBALANCE_SCHEDULE
+
+
+def _benchmark_symbol(universe: str) -> str:
+    return "KS11" if universe in _KR_UNIVERSES else "SPY"
 
 
 def _supabase_post(table: str, body: dict) -> Any:
@@ -38,107 +57,35 @@ def _supabase_post(table: str, body: dict) -> Any:
         return json.loads(resp.read())
 
 
-def _build_screening_sql(conditions: list[dict], universe: str, ref_year: int, ref_quarter: int) -> str:
-    """Build SQL to screen stocks matching conditions at a given quarter."""
-    metric_sql_map = {
-        "per": """
-            (select lc.close / nullif(le.value, 0)
-             from (select stock_id, close from (
-                select dp.stock_id, dp.close, row_number() over (
-                    partition by dp.stock_id order by dp."date" desc
-                ) rn from daily_prices dp
-                where dp."date" <= TO_DATE('{y}-{m:02d}-01','YYYY-MM-DD')
-             ) where rn = 1) lc
-             join (select stock_id, value from (
-                select fs.stock_id, fs.value, row_number() over (
-                    partition by fs.stock_id order by fs.year desc, fs.quarter desc
-                ) rn from financial_statements fs
-                where fs.account_id = 6580 and (fs.year < {y} or (fs.year = {y} and fs.quarter <= {q}))
-             ) where rn = 1) le on le.stock_id = lc.stock_id
-             where lc.stock_id = s.id)""",
-        "pbr": """
-            (select lc.close / nullif(lb.value, 0)
-             from (select stock_id, close from (
-                select dp.stock_id, dp.close, row_number() over (
-                    partition by dp.stock_id order by dp."date" desc
-                ) rn from daily_prices dp
-                where dp."date" <= TO_DATE('{y}-{m:02d}-01','YYYY-MM-DD')
-             ) where rn = 1) lc
-             join (select stock_id, value from (
-                select fs.stock_id, fs.value, row_number() over (
-                    partition by fs.stock_id order by fs.year desc, fs.quarter desc
-                ) rn from financial_statements fs
-                where fs.account_id = 6582 and (fs.year < {y} or (fs.year = {y} and fs.quarter <= {q}))
-             ) where rn = 1) lb on lb.stock_id = lc.stock_id
-             where lc.stock_id = s.id)""",
-        "roe": """
-            (select value from (
-                select fs.stock_id, fs.value, row_number() over (
-                    partition by fs.stock_id order by fs.year desc, fs.quarter desc
-                ) rn from financial_statements fs
-                where fs.account_id = 6579 and fs.stock_id = s.id
-                  and (fs.year < {y} or (fs.year = {y} and fs.quarter <= {q}))
-            ) where rn = 1)""",
-        "operating_income_yoy": """
-            (select case when prev.value > 0 then ((curr.value - prev.value) / prev.value) * 100 else null end
-             from (select value from (
-                select fs.value, row_number() over (order by fs.year desc, fs.quarter desc) rn
-                from financial_statements fs
-                where fs.account_id = 6597 and fs.stock_id = s.id
-                  and (fs.year < {y} or (fs.year = {y} and fs.quarter <= {q}))
-             ) where rn = 1) curr,
-             (select value from (
-                select fs.value, row_number() over (order by fs.year desc, fs.quarter desc) rn
-                from financial_statements fs
-                where fs.account_id = 6597 and fs.stock_id = s.id
-                  and (fs.year < {y} - 1 or (fs.year = {y} - 1 and fs.quarter <= {q}))
-             ) where rn = 1) prev)""",
-        "revenue_yoy": """
-            (select case when prev.value > 0 then ((curr.value - prev.value) / prev.value) * 100 else null end
-             from (select value from (
-                select fs.value, row_number() over (order by fs.year desc, fs.quarter desc) rn
-                from financial_statements fs
-                where fs.account_id = 6592 and fs.stock_id = s.id
-                  and (fs.year < {y} or (fs.year = {y} and fs.quarter <= {q}))
-             ) where rn = 1) curr,
-             (select value from (
-                select fs.value, row_number() over (order by fs.year desc, fs.quarter desc) rn
-                from financial_statements fs
-                where fs.account_id = 6592 and fs.stock_id = s.id
-                  and (fs.year < {y} - 1 or (fs.year = {y} - 1 and fs.quarter <= {q}))
-             ) where rn = 1) prev)""",
-    }
-
-    month = [1, 4, 7, 10][ref_quarter - 1] if 1 <= ref_quarter <= 4 else 1
-    where_clauses = []
-
-    for cond in conditions:
-        metric = cond.get("metric", "").lower().replace(" ", "_")
-        op = cond.get("operator", ">")
-        val = cond.get("value", 0)
-
-        if metric not in metric_sql_map:
-            continue
-
-        subquery = metric_sql_map[metric].format(y=ref_year, q=ref_quarter, m=month)
-        where_clauses.append(f"{subquery} {op} {val}")
-
-    if not where_clauses:
-        return ""
-
-    market_filter = f"s.market = '{universe}'" if universe != "ALL" else "1=1"
-
-    return f"""
-        select s.id as stock_id, s.ticker, s.name
-        from stocks s
-        where {market_filter}
-          and s.country = 'KR'
-          and {' and '.join(where_clauses)}
+def _get_benchmark_return(runner: OracleSQLRunner, symbol: str, start_date: str, end_date: str) -> float:
+    sql = f"""
+        select
+            (select close from (
+                select close, row_number() over (order by "date" desc) rn
+                from benchmark_daily_prices
+                where symbol = '{symbol}'
+                  and "date" <= TO_DATE('{end_date}','YYYY-MM-DD')
+            ) where rn = 1)
+            /
+            nullif((select close from (
+                select close, row_number() over (order by "date" asc) rn
+                from benchmark_daily_prices
+                where symbol = '{symbol}'
+                  and "date" >= TO_DATE('{start_date}','YYYY-MM-DD')
+            ) where rn = 1), 0)
+            - 1 as bench_return
+        from dual
     """
+    try:
+        _, rows = runner(sql)
+        if rows and rows[0].get("bench_return") is not None:
+            return float(rows[0]["bench_return"])
+    except Exception:
+        pass
+    return 0.0
 
 
 def _get_period_return(runner: OracleSQLRunner, stock_ids: list[int], start_date: str, end_date: str) -> dict:
-    """Get average equal-weight return for a basket of stocks over a period."""
     if not stock_ids:
         return {"return": 0.0, "count": 0}
 
@@ -170,7 +117,7 @@ def _get_period_return(runner: OracleSQLRunner, stock_ids: list[int], start_date
         where ep.price > 0
     """
     try:
-        cols, rows = runner(sql)
+        _, rows = runner(sql)
         if rows:
             return {
                 "return": float(rows[0].get("avg_return", 0) or 0),
@@ -181,34 +128,52 @@ def _get_period_return(runner: OracleSQLRunner, stock_ids: list[int], start_date
     return {"return": 0.0, "count": 0}
 
 
+def _build_rebal_dates(universe: str, years: int, rebalance: str, now: datetime) -> list[tuple[str, str]]:
+    """Return list of (start_date, end_date) tuples for each rebalancing period."""
+    start_year = now.year - years
+    rebal_dates: list[tuple[str, str]] = []
+
+    if rebalance == "monthly":
+        y, m = start_year, 1
+        while (y, m) <= (now.year, now.month):
+            nm = (m % 12) + 1
+            ny = y + (1 if m == 12 else 0)
+            rebal_dates.append((f"{y}-{m:02d}-01", f"{ny}-{nm:02d}-01"))
+            m, y = nm, ny
+
+    else:
+        schedule = _rebalance_schedule(universe)
+        months = [s[0] for s in schedule]
+
+        if rebalance == "semiannual":
+            months = [months[0], months[2]]
+        elif rebalance == "annual":
+            months = [months[0]]
+
+        points = [
+            f"{y}-{m:02d}-01"
+            for y in range(start_year, now.year + 1)
+            for m in months
+            if (y, m) <= (now.year, now.month)
+        ]
+
+        for i in range(len(points) - 1):
+            rebal_dates.append((points[i], points[i + 1]))
+
+    return rebal_dates
+
+
 def _run_backtest_logic(
     runner: OracleSQLRunner,
-    conditions: list[dict],
+    screening_sql: str,
     universe: str,
     years: int,
     rebalance: str,
 ) -> dict:
-    """Run the backtest and return results."""
     now = datetime.now(timezone.utc)
-    start_year = now.year - years
+    rebal_dates = _build_rebal_dates(universe, years, rebalance, now)
 
-    # Generate rebalancing dates
-    if rebalance == "annual":
-        periods = [(y, 1) for y in range(start_year, now.year + 1)]
-    elif rebalance == "semiannual":
-        periods = []
-        for y in range(start_year, now.year + 1):
-            periods.extend([(y, 1), (y, 3)])
-    else:  # quarterly
-        periods = []
-        for y in range(start_year, now.year + 1):
-            periods.extend([(y, q) for q in range(1, 5)])
-
-    # Trim future periods
-    current_q = (now.month - 1) // 3 + 1
-    periods = [(y, q) for y, q in periods if y < now.year or (y == now.year and q <= current_q)]
-
-    if len(periods) < 2:
+    if len(rebal_dates) < 2:
         return {"error": "백테스트 기간이 너무 짧습니다."}
 
     equity_curve = []
@@ -220,60 +185,39 @@ def _run_backtest_logic(
     total_holdings = 0
     period_count = 0
 
-    for i in range(len(periods) - 1):
-        y, q = periods[i]
-        ny, nq = periods[i + 1]
+    periods_per_year = {
+        "monthly": 12,
+        "quarterly": len(_rebalance_schedule(universe)),
+        "semiannual": 2,
+        "annual": 1,
+    }.get(rebalance, 4)
 
-        month = [1, 4, 7, 10][q - 1]
-        next_month = [1, 4, 7, 10][nq - 1]
-        start_date = f"{y}-{month:02d}-01"
-        end_date = f"{ny}-{next_month:02d}-01"
+    bench_symbol = _benchmark_symbol(universe)
 
-        # Screen stocks
-        screening_sql = _build_screening_sql(conditions, universe, y, q)
-        if not screening_sql:
-            continue
+    for start_date, end_date in rebal_dates[:-1]:
+        period_label = start_date[:7]
+
+        # Substitute as_of_date into screening SQL
+        try:
+            sql = screening_sql.format(as_of_date=start_date)
+        except KeyError as e:
+            return {"error": f"screening_sql에 알 수 없는 플레이스홀더가 있습니다: {e}"}
 
         try:
-            cols, rows = runner(screening_sql)
+            _, rows = runner(sql)
             stock_ids = [int(r["stock_id"]) for r in rows if r.get("stock_id")]
-        except Exception:
+        except Exception as exc:
             stock_ids = []
 
         if not stock_ids:
-            period_returns.append({
-                "period": f"{y}Q{q}",
-                "return_pct": 0.0,
-                "benchmark_pct": 0.0,
-                "holdings": 0,
-            })
-            equity_curve.append({
-                "date": start_date,
-                "portfolio": round(portfolio_value, 2),
-                "benchmark": round(benchmark_value, 2),
-            })
+            period_returns.append({"period": period_label, "return_pct": 0.0, "benchmark_pct": 0.0, "holdings": 0})
+            equity_curve.append({"date": start_date, "portfolio": round(portfolio_value, 2), "benchmark": round(benchmark_value, 2)})
             continue
 
-        # Get portfolio return
         result = _get_period_return(runner, stock_ids, start_date, end_date)
-        period_ret = result["return"]
+        period_ret = result["return"] - 0.003  # 0.3% transaction cost
 
-        # Adjust for transaction cost (0.3% round trip)
-        period_ret -= 0.003
-
-        # Get benchmark return (all KOSPI stocks equal weight)
-        bench_sql = f"""
-            select s.id as stock_id from stocks s
-            where s.market = '{universe}' and s.country = 'KR'
-            fetch first 200 rows only
-        """
-        try:
-            _, bench_rows = runner(bench_sql)
-            bench_ids = [int(r["stock_id"]) for r in bench_rows if r.get("stock_id")]
-            bench_result = _get_period_return(runner, bench_ids, start_date, end_date)
-            bench_ret = bench_result["return"]
-        except Exception:
-            bench_ret = 0.0
+        bench_ret = _get_benchmark_return(runner, bench_symbol, start_date, end_date)
 
         portfolio_value *= (1 + period_ret)
         benchmark_value *= (1 + bench_ret)
@@ -288,7 +232,7 @@ def _run_backtest_logic(
         period_count += 1
 
         period_returns.append({
-            "period": f"{y}Q{q}",
+            "period": period_label,
             "return_pct": round(period_ret * 100, 2),
             "benchmark_pct": round(bench_ret * 100, 2),
             "holdings": len(stock_ids),
@@ -299,20 +243,18 @@ def _run_backtest_logic(
             "benchmark": round(benchmark_value, 2),
         })
 
-    # Final metrics
     total_return = (portfolio_value / 10000.0) - 1
     bench_total = (benchmark_value / 10000.0) - 1
-    actual_years = max(len(periods) - 1, 1) / 4  # quarters to years
+    actual_years = max(len(rebal_dates) - 1, 1) / periods_per_year
 
     cagr = (math.pow(1 + total_return, 1 / actual_years) - 1) * 100 if actual_years > 0 and total_return > -1 else 0
     bench_cagr = (math.pow(1 + bench_total, 1 / actual_years) - 1) * 100 if actual_years > 0 and bench_total > -1 else 0
 
-    # Simple Sharpe (annualized return / annualized vol)
     if period_returns:
         rets = [p["return_pct"] / 100 for p in period_returns]
         mean_ret = sum(rets) / len(rets)
         var_ret = sum((r - mean_ret) ** 2 for r in rets) / max(len(rets) - 1, 1)
-        annual_vol = math.sqrt(var_ret * 4) if rebalance == "quarterly" else math.sqrt(var_ret * 2)  # annualize
+        annual_vol = math.sqrt(var_ret * periods_per_year)
         sharpe = (cagr / 100) / annual_vol if annual_vol > 0 else 0
     else:
         sharpe = 0
@@ -333,7 +275,7 @@ def _run_backtest_logic(
 @dataclass(slots=True)
 class RunBacktestAction(Action):
     strategy_name: str = ""
-    conditions: list = field(default_factory=list)
+    screening_sql: str = ""
     universe: str = "KOSPI"
     years: int = 5
     rebalance: str = "quarterly"
@@ -341,7 +283,7 @@ class RunBacktestAction(Action):
     def to_arguments_json(self) -> str:
         return json.dumps({
             "strategy_name": self.strategy_name,
-            "conditions": self.conditions,
+            "screening_sql": self.screening_sql,
             "universe": self.universe,
             "years": self.years,
             "rebalance": self.rebalance,
@@ -376,12 +318,15 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
     state = conversation.state
     user_id = state.get_agent_state("user_id")
 
+    if not action.screening_sql.strip():
+        return RunBacktestObservation(success=False, summary="screening_sql이 비어 있습니다.")
+
     runner = OracleSQLRunner()
 
     try:
         results = _run_backtest_logic(
             runner=runner,
-            conditions=action.conditions,
+            screening_sql=action.screening_sql,
             universe=action.universe,
             years=action.years,
             rebalance=action.rebalance,
@@ -394,15 +339,14 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
 
     elapsed_ms = int((time.time() - start_time) * 1000)
 
-    # Save to Supabase
     if user_id and SUPABASE_URL and SUPABASE_SERVICE_KEY:
         try:
             _supabase_post("backtest_results", {
                 "user_id": user_id,
                 "session_id": state.get_agent_state("session_id"),
                 "strategy_name": action.strategy_name,
-                "strategy_description": json.dumps(action.conditions, ensure_ascii=False),
-                "conditions": action.conditions,
+                "strategy_description": action.screening_sql,
+                "conditions": [],
                 "universe": action.universe,
                 "rebalance_period": action.rebalance,
                 "backtest_years": action.years,
@@ -420,7 +364,7 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
                 "elapsed_ms": elapsed_ms,
             })
         except Exception:
-            pass  # Non-critical
+            pass
 
     summary = (
         f"{action.strategy_name}: {action.years}년간 {action.universe} 대상, "
@@ -428,11 +372,9 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
         f"과거 수익률이 미래 수익률을 보장하지 않습니다."
     )
 
-    # Build dataset rows for data panel display
     period_rows = results.get("period_returns", [])
     eq_curve = results.get("equity_curve", [])
 
-    # Merge equity curve into period returns for a combined view
     display_rows = []
     for i, pr in enumerate(period_rows):
         row = {
@@ -471,28 +413,44 @@ class RunBacktestTool(ToolDefinition):
             "properties": {
                 "strategy_name": {
                     "type": "string",
-                    "description": "Name for this strategy (e.g., '저PER 고성장 전략')",
+                    "description": "Name for this strategy (e.g. '기관 순매수 상위 저PER 전략')",
                 },
-                "conditions": {
-                    "type": "array",
-                    "description": "Screening conditions. Each item: {metric, operator, value}",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "metric": {
-                                "type": "string",
-                                "enum": ["per", "pbr", "roe", "operating_income_yoy", "revenue_yoy"],
-                            },
-                            "operator": {"type": "string", "enum": ["<", ">", "<=", ">="]},
-                            "value": {"type": "number"},
-                        },
-                        "required": ["metric", "operator", "value"],
-                    },
+                "screening_sql": {
+                    "type": "string",
+                    "description": (
+                        "Oracle SQL that returns a 'stock_id' column for each rebalancing period. "
+                        "MUST use {as_of_date} as the date placeholder — the engine substitutes the "
+                        "rebalancing date (YYYY-MM-DD) for each period. "
+                        "Examples:\n"
+                        "  Flow (monthly): "
+                        "SELECT s.id AS stock_id FROM stocks s "
+                        "JOIN kr_investor_trade_daily k ON k.stock_id = s.id "
+                        "WHERE k.\"date\" > TO_DATE('{as_of_date}','YYYY-MM-DD') - 30 "
+                        "AND k.\"date\" <= TO_DATE('{as_of_date}','YYYY-MM-DD') "
+                        "AND s.market = 'KOSPI' "
+                        "GROUP BY s.id HAVING SUM(k.institution_net_value) > 0 "
+                        "ORDER BY SUM(k.institution_net_value) DESC FETCH FIRST 50 ROWS ONLY\n"
+                        "  Financial (quarterly): "
+                        "SELECT s.id AS stock_id FROM stocks s "
+                        "JOIN (SELECT stock_id, value FROM (SELECT stock_id, value, "
+                        "ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY year DESC, quarter DESC) rn "
+                        "FROM financial_statements WHERE account_id = 6580 "
+                        "AND TO_DATE(year||'-'||(quarter*3)||'-28','YYYY-MM-DD') "
+                        "<= TO_DATE('{as_of_date}','YYYY-MM-DD')) WHERE rn=1) eps ON eps.stock_id = s.id "
+                        "JOIN (SELECT stock_id, close FROM (SELECT stock_id, close, "
+                        "ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY \"date\" DESC) rn "
+                        "FROM daily_prices WHERE \"date\" <= TO_DATE('{as_of_date}','YYYY-MM-DD')) WHERE rn=1) "
+                        "p ON p.stock_id = s.id "
+                        "WHERE s.market = 'KOSPI' AND p.close / NULLIF(eps.value, 0) < 15\n"
+                        "Use the same SQL style as run_sql queries but replace hardcoded dates / sysdate "
+                        "with TO_DATE('{as_of_date}','YYYY-MM-DD'). "
+                        "For flow metrics use monthly rebalancing; for financial metrics use quarterly."
+                    ),
                 },
                 "universe": {
                     "type": "string",
-                    "enum": ["KOSPI", "KOSDAQ", "ALL"],
-                    "description": "Stock universe (default: KOSPI)",
+                    "enum": ["KOSPI", "KOSDAQ", "SP500", "NASDAQ", "ALL"],
+                    "description": "Stock universe for benchmark selection. KR→KS11, US→SPY.",
                 },
                 "years": {
                     "type": "integer",
@@ -500,11 +458,16 @@ class RunBacktestTool(ToolDefinition):
                 },
                 "rebalance": {
                     "type": "string",
-                    "enum": ["quarterly", "semiannual", "annual"],
-                    "description": "Rebalancing frequency (default: quarterly)",
+                    "enum": ["monthly", "quarterly", "semiannual", "annual"],
+                    "description": (
+                        "Rebalancing frequency. "
+                        "monthly: for flow/sentiment conditions (수급, 공매도 등). "
+                        "quarterly: for financial statement conditions (PER, ROE 등). "
+                        "Mixed (flow + financial): use quarterly."
+                    ),
                 },
             },
-            "required": ["strategy_name", "conditions"],
+            "required": ["strategy_name", "screening_sql"],
         }
 
 
@@ -512,11 +475,18 @@ def make_run_backtest_tool() -> RunBacktestTool:
     return RunBacktestTool(
         name="run_backtest",
         description=(
-            "Run a historical backtest for a factor-based stock screening strategy. "
-            "Tests how a portfolio of stocks matching the given conditions would have performed. "
-            "Supported metrics: per, pbr, roe, operating_income_yoy, revenue_yoy. "
+            "Run a historical backtest for any stock screening strategy. "
+            "The agent writes a screening SQL with {as_of_date} placeholder; "
+            "the engine runs it for each rebalancing period and calculates portfolio returns. "
+            "The SQL must return a 'stock_id' column. "
+            "Use the same SQL patterns as run_sql queries — just replace hardcoded dates or sysdate "
+            "with TO_DATE('{as_of_date}','YYYY-MM-DD'). "
+            "When the user asks to backtest a strategy discussed in this session, "
+            "adapt the screening SQL already used (or planned) for that strategy. "
+            "Include ALL criteria the user mentioned — do not drop flow or financial conditions. "
+            "Benchmark: KS11 for KR markets, SPY for US markets. "
             "Results are saved to the user's backtest archive. "
-            "Always include the disclaimer: past returns do not guarantee future results."
+            "Always include the disclaimer: 과거 수익률이 미래 수익률을 보장하지 않습니다."
         ),
         action_type=RunBacktestAction,
         observation_type=RunBacktestObservation,
