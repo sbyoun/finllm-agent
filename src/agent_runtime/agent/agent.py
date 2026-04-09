@@ -14,6 +14,7 @@ from agent_runtime.event.observation import AgentErrorEvent, ObservationEvent
 from agent_runtime.llm.client import LLMToolCall, Message
 from agent_runtime.tool.news.search_news import SearchNewsAction, SearchNewsObservation
 from agent_runtime.tool.portfolio.get_portfolio import GetPortfolioObservation
+from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation
 from agent_runtime.tool.sql.run_sql import RunSQLAction, RunSQLObservation
 
 
@@ -130,6 +131,20 @@ class Agent(AgentBase):
         elif isinstance(observation, SearchNewsObservation):
             summary["row_count"] = len(observation.rows)
             summary["preview_rows"] = observation.rows[:3]
+        elif isinstance(observation, RunBacktestObservation):
+            summary["success"] = observation.success
+            summary["cagr_pct"] = observation.cagr_pct
+            summary["mdd_pct"] = observation.mdd_pct
+            summary["total_return_pct"] = observation.total_return_pct
+            summary["excess_return_pct"] = observation.excess_return_pct
+            if hasattr(action, "strategy_name"):
+                summary["strategy_name"] = action.strategy_name
+            if hasattr(action, "screening_sql"):
+                summary["screening_sql"] = action.screening_sql
+            if hasattr(action, "months") and action.months > 0:
+                summary["months"] = action.months
+            elif hasattr(action, "years"):
+                summary["years"] = action.years
         elif isinstance(observation, GetPortfolioObservation):
             summary["row_count"] = len(observation.rows)
             summary["rows"] = observation.rows[:10]
@@ -179,24 +194,46 @@ class Agent(AgentBase):
         if isinstance(previous_result, dict):
             summary = str(previous_result.get("summary") or "").strip()
             if summary:
-                lines.append(f"- Previous result summary: {self._truncate_text(summary, limit=300)}")
+                lines.append(f"- Previous result summary: {self._truncate_text(summary, limit=800)}")
 
         recent_tool_history = agent_state.get("recent_tool_history")
         if isinstance(recent_tool_history, list) and recent_tool_history:
-            rendered_tools: list[str] = []
-            for item in recent_tool_history[-4:]:
+            lines.append("")
+            lines.append("### Previous tool calls (reuse successful queries, do NOT repeat failed ones)")
+            for item in recent_tool_history[-6:]:
                 if not isinstance(item, dict):
                     continue
                 tool = str(item.get("tool") or "").strip()
-                if tool:
-                    rendered_tools.append(tool)
-            if rendered_tools:
-                lines.append(f"- Recent tool history: {' -> '.join(rendered_tools)}")
+                if not tool:
+                    continue
+                row_count = item.get("row_count", "")
+                sql = str(item.get("sql") or "").strip()
+                title = str(item.get("title") or "").strip()
+                label = title if title else tool
+                if tool == "run_sql" and sql:
+                    sql_oneline = " ".join(sql.split())[:200]
+                    status = "EMPTY" if row_count == 0 else f"{row_count} rows"
+                    lines.append(f"- [{label}] {status}, sql: {sql_oneline}")
+                elif tool == "run_backtest" and item.get("success"):
+                    bt_name = item.get("strategy_name") or "backtest"
+                    period = f"{item['months']}개월" if item.get("months") else f"{item.get('years', '?')}년"
+                    bt_sql = " ".join(str(item.get("screening_sql") or "").split())[:200]
+                    lines.append(
+                        f"- [BACKTEST EXECUTED: {bt_name}] {period}, "
+                        f"CAGR={item.get('cagr_pct')}%, MDD={item.get('mdd_pct')}%, "
+                        f"excess={item.get('excess_return_pct')}%p"
+                    )
+                    if bt_sql:
+                        lines.append(f"  screening_sql: {bt_sql}")
+                elif row_count != "":
+                    lines.append(f"- [{label}] row_count={row_count}")
+                else:
+                    lines.append(f"- [{label}]")
 
         lines.extend(
             [
                 "",
-                "If the needed holdings, schema context, or recent SQL result are already listed above, reuse them instead of reloading them.",
+                "IMPORTANT: Adapt from successful queries above (row_count > 0). Never repeat a query pattern that returned EMPTY.",
             ]
         )
         return "\n".join(lines)

@@ -51,7 +51,7 @@ class RunSQLTool(ToolDefinition):
                 "role": {
                     "type": "string",
                     "enum": ["final", "diagnostic"],
-                    "description": "Use 'final' for analysis results that should be displayed to the user in the data panel. Use 'diagnostic' for schema exploration, account lookups, stock resolution, or any intermediate query not meant for display.",
+                    "description": "Default to 'final'. Use 'diagnostic' ONLY for schema/metadata lookups (e.g., listing tables, finding column names, resolving stock IDs). Any query that returns actual market data, financials, prices, or rankings MUST use 'final'.",
                 },
             },
             "required": ["sql"],
@@ -72,9 +72,11 @@ def make_run_sql_tool(runner: SQLRunner) -> RunSQLTool:
     return RunSQLTool(
         name="run_sql",
         description=(
-            "Execute a SQL query and return tabular results. "
-            "Set role='final' for analysis results to display in the data panel. "
-            "Set role='diagnostic' for schema exploration, account lookups, or intermediate queries."
+            "Execute SQL query. "
+            "NEVER use SYSDATE/CURRENT_DATE/today's date — use MAX(\"date\") subquery instead. "
+            "0 rows → retry with MAX(\"date\") or broader filters. "
+            "role='final'(default) for data queries; role='diagnostic' ONLY for schema lookups. "
+            "State actual date in answer (e.g. '4월 8일 기준'), not '오늘'."
         ),
         action_type=RunSQLAction,
         observation_type=RunSQLObservation,
