@@ -128,13 +128,20 @@ def _get_period_return(runner: OracleSQLRunner, stock_ids: list[int], start_date
     return {"return": 0.0, "count": 0}
 
 
-def _build_rebal_dates(universe: str, years: int, rebalance: str, now: datetime) -> list[tuple[str, str]]:
+def _build_rebal_dates(universe: str, years: int, rebalance: str, now: datetime, *, months: int = 0) -> list[tuple[str, str]]:
     """Return list of (start_date, end_date) tuples for each rebalancing period."""
-    start_year = now.year - years
+    if months > 0:
+        # Calculate start from months instead of years
+        start_m = now.month - months
+        start_year = now.year + (start_m - 1) // 12  # handles negative months
+        start_month = ((start_m - 1) % 12) + 1
+    else:
+        start_year = now.year - years
+        start_month = 1
     rebal_dates: list[tuple[str, str]] = []
 
     if rebalance == "monthly":
-        y, m = start_year, 1
+        y, m = start_year, start_month
         while (y, m) <= (now.year, now.month):
             nm = (m % 12) + 1
             ny = y + (1 if m == 12 else 0)
@@ -154,7 +161,7 @@ def _build_rebal_dates(universe: str, years: int, rebalance: str, now: datetime)
             f"{y}-{m:02d}-01"
             for y in range(start_year, now.year + 1)
             for m in months
-            if (y, m) <= (now.year, now.month)
+            if (y, m) >= (start_year, start_month) and (y, m) <= (now.year, now.month)
         ]
 
         for i in range(len(points) - 1):
@@ -169,9 +176,11 @@ def _run_backtest_logic(
     universe: str,
     years: int,
     rebalance: str,
+    *,
+    months: int = 0,
 ) -> dict:
     now = datetime.now(timezone.utc)
-    rebal_dates = _build_rebal_dates(universe, years, rebalance, now)
+    rebal_dates = _build_rebal_dates(universe, years, rebalance, now, months=months)
 
     if len(rebal_dates) < 2:
         return {"error": "백테스트 기간이 너무 짧습니다."}
@@ -243,9 +252,32 @@ def _run_backtest_logic(
             "benchmark": round(benchmark_value, 2),
         })
 
+    # Trim leading empty periods (no holdings = no data for that range)
+    first_active = next((i for i, pr in enumerate(period_returns) if pr["holdings"] > 0), len(period_returns))
+    if first_active > 0:
+        period_returns = period_returns[first_active:]
+        equity_curve = equity_curve[first_active:]
+        # Recalculate from trimmed start
+        if period_returns:
+            portfolio_value = 10000.0
+            benchmark_value = 10000.0
+            peak = portfolio_value
+            max_dd = 0.0
+            for i, pr in enumerate(period_returns):
+                portfolio_value *= (1 + pr["return_pct"] / 100)
+                benchmark_value *= (1 + pr["benchmark_pct"] / 100)
+                if portfolio_value > peak:
+                    peak = portfolio_value
+                dd = (portfolio_value - peak) / peak
+                if dd < max_dd:
+                    max_dd = dd
+                if i < len(equity_curve):
+                    equity_curve[i]["portfolio"] = round(portfolio_value, 2)
+                    equity_curve[i]["benchmark"] = round(benchmark_value, 2)
+
     total_return = (portfolio_value / 10000.0) - 1
     bench_total = (benchmark_value / 10000.0) - 1
-    actual_years = max(len(rebal_dates) - 1, 1) / periods_per_year
+    actual_years = max(len(period_returns), 1) / periods_per_year
 
     cagr = (math.pow(1 + total_return, 1 / actual_years) - 1) * 100 if actual_years > 0 and total_return > -1 else 0
     bench_cagr = (math.pow(1 + bench_total, 1 / actual_years) - 1) * 100 if actual_years > 0 and bench_total > -1 else 0
@@ -266,7 +298,9 @@ def _run_backtest_logic(
         "total_return_pct": round(total_return * 100, 2),
         "benchmark_cagr_pct": round(bench_cagr, 2),
         "excess_return_pct": round(cagr - bench_cagr, 2),
-        "avg_holding_count": round(total_holdings / max(period_count, 1), 1),
+        "avg_holding_count": round(
+            sum(pr["holdings"] for pr in period_returns) / max(len([pr for pr in period_returns if pr["holdings"] > 0]), 1), 1
+        ),
         "equity_curve": equity_curve,
         "period_returns": period_returns,
     }
@@ -279,15 +313,19 @@ class RunBacktestAction(Action):
     universe: str = "KOSPI"
     years: int = 5
     rebalance: str = "quarterly"
+    months: int = 0
 
     def to_arguments_json(self) -> str:
-        return json.dumps({
+        d: dict[str, Any] = {
             "strategy_name": self.strategy_name,
             "screening_sql": self.screening_sql,
             "universe": self.universe,
             "years": self.years,
             "rebalance": self.rebalance,
-        }, ensure_ascii=False)
+        }
+        if self.months > 0:
+            d["months"] = self.months
+        return json.dumps(d, ensure_ascii=False)
 
 
 @dataclass(slots=True)
@@ -305,11 +343,14 @@ class RunBacktestObservation(Observation):
 
     def to_text(self) -> str:
         if self.success:
-            return (
+            text = (
                 f"Backtest completed. CAGR: {self.cagr_pct}%, MDD: {self.mdd_pct}%, "
                 f"Total return: {self.total_return_pct}%, Excess vs benchmark: {self.excess_return_pct}%p. "
                 f"{self.summary}"
             )
+            if self.rows and all(r.get("return_pct", 0) == 0 and r.get("holdings", 0) == 0 for r in self.rows):
+                text += " WARNING: All periods returned 0 holdings — the screening SQL likely matched no stocks. Check the query."
+            return text
         return f"Backtest failed: {self.summary}"
 
 
@@ -330,6 +371,7 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
             universe=action.universe,
             years=action.years,
             rebalance=action.rebalance,
+            months=action.months,
         )
     except Exception as exc:
         return RunBacktestObservation(success=False, summary=str(exc))
@@ -349,7 +391,7 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
                 "conditions": [],
                 "universe": action.universe,
                 "rebalance_period": action.rebalance,
-                "backtest_years": action.years,
+                "backtest_years": action.months / 12 if action.months > 0 else action.years,
                 "cagr_pct": results["cagr_pct"],
                 "mdd_pct": results["mdd_pct"],
                 "sharpe_ratio": results["sharpe_ratio"],
@@ -366,8 +408,9 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
         except Exception:
             pass
 
+    period_label = f"{action.months}개월" if action.months > 0 else f"{action.years}년"
     summary = (
-        f"{action.strategy_name}: {action.years}년간 {action.universe} 대상, "
+        f"{action.strategy_name}: {period_label}간 {action.universe} 대상, "
         f"{action.rebalance} 리밸런싱. "
         f"과거 수익률이 미래 수익률을 보장하지 않습니다."
     )
@@ -418,33 +461,10 @@ class RunBacktestTool(ToolDefinition):
                 "screening_sql": {
                     "type": "string",
                     "description": (
-                        "Oracle SQL that returns a 'stock_id' column for each rebalancing period. "
-                        "MUST use {as_of_date} as the date placeholder — the engine substitutes the "
-                        "rebalancing date (YYYY-MM-DD) for each period. "
-                        "Examples:\n"
-                        "  Flow (monthly): "
-                        "SELECT s.id AS stock_id FROM stocks s "
-                        "JOIN kr_investor_trade_daily k ON k.stock_id = s.id "
-                        "WHERE k.\"date\" > TO_DATE('{as_of_date}','YYYY-MM-DD') - 30 "
-                        "AND k.\"date\" <= TO_DATE('{as_of_date}','YYYY-MM-DD') "
-                        "AND s.market = 'KOSPI' "
-                        "GROUP BY s.id HAVING SUM(k.institution_net_value) > 0 "
-                        "ORDER BY SUM(k.institution_net_value) DESC FETCH FIRST 50 ROWS ONLY\n"
-                        "  Financial (quarterly): "
-                        "SELECT s.id AS stock_id FROM stocks s "
-                        "JOIN (SELECT stock_id, value FROM (SELECT stock_id, value, "
-                        "ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY year DESC, quarter DESC) rn "
-                        "FROM financial_statements WHERE account_id = 6580 "
-                        "AND TO_DATE(year||'-'||(quarter*3)||'-28','YYYY-MM-DD') "
-                        "<= TO_DATE('{as_of_date}','YYYY-MM-DD')) WHERE rn=1) eps ON eps.stock_id = s.id "
-                        "JOIN (SELECT stock_id, close FROM (SELECT stock_id, close, "
-                        "ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY \"date\" DESC) rn "
-                        "FROM daily_prices WHERE \"date\" <= TO_DATE('{as_of_date}','YYYY-MM-DD')) WHERE rn=1) "
-                        "p ON p.stock_id = s.id "
-                        "WHERE s.market = 'KOSPI' AND p.close / NULLIF(eps.value, 0) < 15\n"
-                        "Use the same SQL style as run_sql queries but replace hardcoded dates / sysdate "
-                        "with TO_DATE('{as_of_date}','YYYY-MM-DD'). "
-                        "For flow metrics use monthly rebalancing; for financial metrics use quarterly."
+                        "Oracle SQL returning 'stock_id' column. Uses {as_of_date} placeholder "
+                        "(engine substitutes YYYY-MM-DD per period). "
+                        "ONLY use criteria the user mentioned — NEVER invent conditions. "
+                        "Adapt from SQL already used in this session, replacing dates with TO_DATE('{as_of_date}','YYYY-MM-DD')."
                     ),
                 },
                 "universe": {
@@ -454,7 +474,11 @@ class RunBacktestTool(ToolDefinition):
                 },
                 "years": {
                     "type": "integer",
-                    "description": "Backtest period in years (default: 5, max: 10)",
+                    "description": "Backtest period in years (default: 5, max: 10). Ignored when months is set.",
+                },
+                "months": {
+                    "type": "integer",
+                    "description": "Backtest period in months. Use this for sub-year periods (e.g. 3 for 3개월). When set, years is ignored. Use rebalance='monthly' with short periods.",
                 },
                 "rebalance": {
                     "type": "string",
@@ -475,18 +499,10 @@ def make_run_backtest_tool() -> RunBacktestTool:
     return RunBacktestTool(
         name="run_backtest",
         description=(
-            "Run a historical backtest for any stock screening strategy. "
-            "The agent writes a screening SQL with {as_of_date} placeholder; "
-            "the engine runs it for each rebalancing period and calculates portfolio returns. "
-            "The SQL must return a 'stock_id' column. "
-            "Use the same SQL patterns as run_sql queries — just replace hardcoded dates or sysdate "
-            "with TO_DATE('{as_of_date}','YYYY-MM-DD'). "
-            "When the user asks to backtest a strategy discussed in this session, "
-            "adapt the screening SQL already used (or planned) for that strategy. "
-            "Include ALL criteria the user mentioned — do not drop flow or financial conditions. "
-            "Benchmark: KS11 for KR markets, SPY for US markets. "
-            "Results are saved to the user's backtest archive. "
-            "Always include the disclaimer: 과거 수익률이 미래 수익률을 보장하지 않습니다."
+            "Run historical backtest with {as_of_date} placeholder in screening SQL. "
+            "Only call when user explicitly requests a backtest — for condition/result questions, answer from session context. "
+            "If some conditions are excluded (e.g. insufficient data), state what was included/excluded and why. "
+            "Always include: 과거 수익률이 미래 수익률을 보장하지 않습니다."
         ),
         action_type=RunBacktestAction,
         observation_type=RunBacktestObservation,

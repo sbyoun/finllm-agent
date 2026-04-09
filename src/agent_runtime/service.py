@@ -424,7 +424,9 @@ def _build_result(
         elif isinstance(event, ObservationEvent):
             if isinstance(event.observation, RunSQLObservation):
                 obs = event.observation
-                if obs.role == "final":
+                is_lookup = set(obs.columns) <= {"id", "ticker", "name", "stock_id", "sector_group", "sector"}
+                effective_role = "diagnostic" if is_lookup else obs.role
+                if effective_role == "final":
                     last_sql_observation = obs
                     last_sql_action = pending_sql_action
                     if pending_sql_action is not None:
@@ -483,8 +485,8 @@ def _build_result(
                 preferredColumns=["period", "return_pct", "benchmark_pct", "excess_pct", "holdings"],
             ),
         )
-    elif last_sql_action and last_sql_observation and last_sql_observation.row_count >= 0:
-        datasets = [_build_dataset_from_sql(action, observation) for action, observation in final_sql_results]
+    elif last_sql_action and last_sql_observation and last_sql_observation.row_count > 0:
+        datasets = [_build_dataset_from_sql(action, observation) for action, observation in final_sql_results if observation.row_count > 0]
         sql_scripts = [action.sql for action, _ in final_sql_results]
         dataset = _build_dataset_from_sql(last_sql_action, last_sql_observation)
         sql = last_sql_action.sql
