@@ -20,7 +20,7 @@ from agent_runtime.event.message import MessageEvent
 from agent_runtime.event.observation import AgentErrorEvent, ObservationEvent
 from agent_runtime.event.state_update import ConversationStateUpdateEvent
 from agent_runtime.llm import RuntimeLlmConfig, create_default_llm_client, create_llm_client
-from agent_runtime.prompt import DEFAULT_SKILL_FILES, build_system_prompt
+from agent_runtime.prompt import DEFAULT_SKILL_FILES, DEFAULT_SKILL_FILES_COMPACT, build_system_prompt
 from agent_runtime.tool.news import SearchNewsObservation, make_search_news_tool
 from agent_runtime.tool.portfolio import make_get_portfolio_tool
 from agent_runtime.tool.sql import RunSQLAction, RunSQLObservation, make_run_sql_tool
@@ -235,6 +235,7 @@ def _build_agent(*, repo_root: Path, llm_config: RuntimeLlmConfig | None) -> Age
         system_prompt=build_system_prompt(tools=tools, repo_root=repo_root),
         repo_root=str(repo_root),
         skill_files=DEFAULT_SKILL_FILES,
+        skill_files_compact=DEFAULT_SKILL_FILES_COMPACT,
         condenser=LLMSummarizingCondenser(llm=llm, max_size=24, keep_first=2),
     )
 
@@ -457,7 +458,7 @@ def _build_result(
             if event.observation.success:
                 last_backtest_obs = event.observation
 
-    if last_backtest_obs and last_backtest_obs.rows:
+    if last_backtest_obs:
         columns = [
             RuntimeDataColumn(key="period", label="기간"),
             RuntimeDataColumn(key="return_pct", label="수익률(%)"),
@@ -475,6 +476,7 @@ def _build_result(
         )
         mode = "tool-result"
         final_message = _strip_markdown_tables(final_message)
+        datasets = [dataset]
         tool_request = RuntimeToolRequest(
             kind="backtest",
             sql="",

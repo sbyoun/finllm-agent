@@ -5,11 +5,11 @@ from dataclasses import dataclass, field
 from agent_runtime.event.action import ActionEvent
 from agent_runtime.event.base import Event
 from agent_runtime.event.condensation import CondensationEvent
-from agent_runtime.event.message import MessageEvent, SystemPromptEvent
+from agent_runtime.event.message import MessageEvent
 from agent_runtime.event.observation import AgentErrorEvent, ObservationEvent
 
 
-LLM_EVENT_TYPES = (SystemPromptEvent, MessageEvent, ActionEvent, ObservationEvent, AgentErrorEvent, CondensationEvent)
+LLM_EVENT_TYPES = (MessageEvent, ActionEvent, ObservationEvent, AgentErrorEvent, CondensationEvent)
 
 
 @dataclass(slots=True)

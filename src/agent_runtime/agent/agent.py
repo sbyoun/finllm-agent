@@ -338,10 +338,17 @@ class Agent(AgentBase):
                 return
             view = View.from_events(list(conversation.state.event_log))
         messages = view.to_messages()
-        if messages and messages[0].get("role") == "system":
-            state_context = self._state_context(conversation)
-            if state_context:
-                messages[0]["content"] = f"{messages[0]['content']}{state_context}"
+
+        # Build system message: schema → state_context → system_prompt (rules last for recency)
+        agent_state = conversation.state.agent_state
+        has_tool_history = bool(agent_state.get("recent_tool_history"))
+        use_compact = has_tool_history and bool(self.skill_files_compact)
+        schema_ctx = self.resolved_dynamic_context(compact=use_compact) or ""
+        state_ctx = self._state_context(conversation) or ""
+
+        system_content = "\n\n".join(p for p in [schema_ctx, state_ctx, self.system_prompt] if p)
+        messages.insert(0, {"role": "system", "content": system_content})
+
         llm_tools = [tool.as_llm_tool() for tool in self.tools]
         llm_response = self.llm.completion(messages=messages, tools=llm_tools)
         message = self._extract_text_tool_calls(llm_response.message)

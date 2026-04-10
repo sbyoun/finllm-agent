@@ -29,7 +29,7 @@ def _message_to_gemini_parts(message: dict) -> list[dict[str, Any]]:
 
     if role == "tool":
         tool_name = message.get("name", "tool")
-        return [{"text": f"TOOL_RESULT[{tool_name}]\n{content}"}]
+        return [{"text": f"[Result: {tool_name}]\n{content}"}]
 
     parts: list[dict[str, Any]] = []
     if isinstance(content, str) and content:
@@ -40,7 +40,7 @@ def _message_to_gemini_parts(message: dict) -> list[dict[str, Any]]:
         rendered_calls: list[str] = []
         for tool_call in tool_calls:
             rendered_calls.append(
-                "TOOL_CALL[{name}] {args}".format(
+                "[Called: {name}] {args}".format(
                     name=tool_call["function"]["name"],
                     args=tool_call["function"]["arguments"] or "{}",
                 )

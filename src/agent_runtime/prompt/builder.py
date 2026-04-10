@@ -7,6 +7,7 @@ from agent_runtime.tool.tool import ToolDefinition
 
 
 DEFAULT_SKILL_FILES: list[str] = ["schema_guide.md"]
+DEFAULT_SKILL_FILES_COMPACT: list[str] = ["schema_guide_compact.md"]
 
 
 def _prompt_root() -> Path:
