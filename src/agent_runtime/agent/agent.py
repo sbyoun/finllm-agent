@@ -356,7 +356,8 @@ class Agent(AgentBase):
             )
         )
         if should_retry:
-            llm_response = self.llm.completion(messages=messages, tools=llm_tools)
+            # Retry without tools to force a text answer (handles Gemini MALFORMED_FUNCTION_CALL)
+            llm_response = self.llm.completion(messages=messages, tools=None)
             message = self._extract_text_tool_calls(llm_response.message)
 
         if message.tool_calls:

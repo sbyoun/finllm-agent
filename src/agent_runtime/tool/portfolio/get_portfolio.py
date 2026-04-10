@@ -45,7 +45,7 @@ class GetPortfolioTool(ToolDefinition):
         }
 
 
-def _fetch_portfolio_rows(*, user_id: str, session_id: str) -> list[dict[str, Any]]:
+def _fetch_portfolio_rows(*, user_id: str) -> list[dict[str, Any]]:
     base_url = require_env("NEXT_PUBLIC_SUPABASE_URL").rstrip("/")
     service_role_key = require_env("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -53,7 +53,6 @@ def _fetch_portfolio_rows(*, user_id: str, session_id: str) -> list[dict[str, An
         {
             "select": "ticker,name,weight,position_order",
             "user_id": f"eq.{user_id}",
-            "session_id": f"eq.{session_id}",
             "order": "position_order.asc",
         }
     )
@@ -98,8 +97,6 @@ def make_get_portfolio_tool() -> GetPortfolioTool:
         session_id = stored_session_id
         if not user_id:
             raise ValueError("get_portfolio requires a user_id in the request context.")
-        if not session_id:
-            raise ValueError("get_portfolio requires a session_id in the request context.")
         if not _is_uuid(user_id):
             return GetPortfolioObservation(
                 content=[],
@@ -108,7 +105,7 @@ def make_get_portfolio_tool() -> GetPortfolioTool:
                 rows=[],
             )
 
-        rows = _fetch_portfolio_rows(user_id=user_id, session_id=session_id)
+        rows = _fetch_portfolio_rows(user_id=user_id)
         return GetPortfolioObservation(
             content=[],
             user_id=user_id,

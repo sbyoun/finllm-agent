@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -121,6 +122,10 @@ class GeminiClient:
                 )
 
         content = "\n".join(text_parts).strip()
+
+        finish_reason = candidate.get("finishReason", "")
+        if not content and not tool_calls:
+            logging.warning("Gemini empty response: finishReason=%s, candidate=%s", finish_reason, json.dumps(candidate, ensure_ascii=False)[:500])
 
         return LLMResponse(
             message=Message(
