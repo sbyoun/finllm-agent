@@ -17,16 +17,19 @@ class AgentBase(ABC):
     dynamic_context: str | None = None
     repo_root: str | None = None
     skill_files: list[str] = field(default_factory=list)
+    skill_files_compact: list[str] = field(default_factory=list)
     condenser: CondenserBase | None = None
 
-    def resolved_dynamic_context(self) -> str | None:
+    def resolved_dynamic_context(self, *, compact: bool = False) -> str | None:
         parts: list[str] = []
         if self.dynamic_context:
             parts.append(self.dynamic_context)
-        if self.repo_root and self.skill_files:
-            skill_text = load_skill_text(repo_root=self.repo_root, names=self.skill_files)
-            if skill_text:
-                parts.append(skill_text)
+        if self.repo_root:
+            names = self.skill_files_compact if (compact and self.skill_files_compact) else self.skill_files
+            if names:
+                skill_text = load_skill_text(repo_root=self.repo_root, names=names)
+                if skill_text:
+                    parts.append(skill_text)
         return "\n\n".join(parts) if parts else None
 
     @abstractmethod
