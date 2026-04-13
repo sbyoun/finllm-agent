@@ -32,13 +32,23 @@ class SearchNewsObservation(Observation):
     rows: list[dict[str, Any]] = field(default_factory=list)
 
     def to_text(self) -> str:
-        preview = self.rows[:5]
-        return "\n".join(
-            [
-                f"row_count={len(self.rows)}",
-                f"preview_rows={preview}",
-            ]
-        )
+        # 전체 기사를 구조화된 라인으로 노출해야 (a) LLM이 인용 시 URL을 붙일 수 있고
+        # (b) agent_trace에 사후 검증 가능한 소스가 남음. preview 5건만 주면 환각 검증 불가.
+        if not self.rows:
+            return "row_count=0"
+        lines = [f"row_count={len(self.rows)}"]
+        for idx, row in enumerate(self.rows, start=1):
+            title = (row.get("title") or "").strip()
+            source = (row.get("source") or "").strip()
+            published_at = (row.get("published_at") or "").strip()
+            url = (row.get("url") or "").strip()
+            desc = (row.get("description") or "").strip().replace("\n", " ")
+            lines.append(
+                f"[{idx}] title={title} | source={source} | published_at={published_at} | url={url}"
+            )
+            if desc:
+                lines.append(f"    snippet={desc}")
+        return "\n".join(lines)
 
 
 class SearchNewsTool(ToolDefinition):

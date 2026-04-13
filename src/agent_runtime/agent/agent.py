@@ -19,7 +19,18 @@ from agent_runtime.tool.sql.run_sql import RunSQLAction, RunSQLObservation
 
 
 def _tool_call_key(tool_call: LLMToolCall) -> str:
-    return f"{tool_call.name}:{tool_call.arguments or '{}'}"
+    args_raw = tool_call.arguments or "{}"
+    if tool_call.name == "run_sql":
+        # SQL은 공백/개행/대소문자만 다른 사실상 동일한 쿼리가 루프 발생 원인.
+        # 정규화된 키로 3회 반복을 동일 쿼리로 취급해 차단한다.
+        try:
+            parsed = json.loads(args_raw)
+            sql = str(parsed.get("sql") or "")
+            normalized = " ".join(sql.lower().split())
+            return f"run_sql:{normalized}"
+        except Exception:
+            pass
+    return f"{tool_call.name}:{args_raw}"
 
 
 @dataclass(slots=True)
@@ -346,8 +357,18 @@ class Agent(AgentBase):
         schema_ctx = self.resolved_dynamic_context(compact=use_compact) or ""
         state_ctx = self._state_context(conversation) or ""
 
-        system_content = "\n\n".join(p for p in [schema_ctx, state_ctx, self.system_prompt] if p)
-        messages.insert(0, {"role": "system", "content": system_content})
+        # system은 static self.system_prompt만 — prompt cache prefix 매칭용.
+        # 동적 컨텍스트(schema/state)는 맨 끝 user 메시지로 분리해서 <context> 태그로 감싼다.
+        # 맨 끝에 둬야 앞쪽 message history가 전부 static prefix가 되어 캐시 hit 가능.
+        messages.insert(0, {"role": "system", "content": self.system_prompt})
+        dynamic_ctx = "\n\n".join(p for p in [schema_ctx, state_ctx] if p)
+        if dynamic_ctx:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"<context>\n{dynamic_ctx}\n</context>",
+                }
+            )
 
         llm_tools = [tool.as_llm_tool() for tool in self.tools]
         llm_response = self.llm.completion(messages=messages, tools=llm_tools)

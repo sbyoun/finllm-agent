@@ -34,8 +34,10 @@ DB 질문이면 이 문서를 기준으로 SQL을 작성한다.
 ## 테이블 스키마
 
 ### stocks
-cols: id | ticker | name | country | market
+cols: id | ticker | name | country | market | instrument_type
 용도: 종목 식별 앵커. 가격/재무 조인 전 반드시 stocks에서 대상 확인.
+`instrument_type`: `stock`(주식) | `etf`(ETF). 한국 ETF 유니버스는 `country='KR' AND instrument_type='etf'` (1088종목). 주식만 원하면 `instrument_type='stock'` 필수. 미국은 현재 `instrument_type='stock'`만 싱크됨(sp1500 고정) — 미국 ETF는 `us_stock_snapshots` 참조.
+`market`(KR): KOSPI / KOSDAQ / KONEX / KRX / KOSDAQ GLOBAL. 한국 거래소 구분은 이 컬럼 사용.
 
 ### daily_prices
 cols: stock_id | "date" | open | high | low | close | volume
@@ -82,8 +84,16 @@ cols: stock_id | "date" | short_sale_qty/value | short_sale_volume_ratio | cumul
 *_value 단위: 백만원.
 
 ### kr_stock_snapshots
-cols: "date" | ticker | name | market | market_cap(백만원) | listed_shares | kospi200_sector | kospi100 | kospi50 | krx300 | kosdaq150 | market_cap_size | preferred
+cols: "date" | ticker | name | market | market_cap(백만원) | listed_shares | kospi200_sector | kospi100 | kospi50 | krx300 | kosdaq150 | market_cap_size | preferred | group_code
 join: ticker → stocks.ticker. KOSPI200 편입 = kospi200_sector <> '0'. 데이터 시작: 2026-03-09.
+`group_code`: ST(주식) | EF(ETF, 1088) | EN(ETN) | RT(리츠) 등. ETF만 필요하면 `stocks.instrument_type='etf'` 쪽이 더 간단.
+
+### us_stock_snapshots
+cols: symbol | name | exchange | instrument_type | security_type | group_code | …
+`exchange`: **NAS**(나스닥) | **NYS**(뉴욕) | **AMS**(아멕스). 미국 거래소 구분은 이 컬럼이 유일한 소스 (stocks에는 없음).
+`instrument_type`: stock | etf. `group_code`: 001=ETF / 002=ETN / 003=ETC / 004=Others.
+**나스닥 주식 추출 패턴**: `SELECT symbol FROM us_stock_snapshots WHERE exchange='NAS' AND instrument_type='stock'` (~3,875종목). stocks 테이블과 조인할 때는 `stocks.ticker = us_stock_snapshots.symbol`.
+**미국 ETF 유니버스**: `us_stock_snapshots WHERE instrument_type='etf'` (~5,505종목). 가격은 현재 stocks에 싱크 안 돼 있어 SP1500 외 US ETF의 daily_prices는 미제공.
 
 ## 섹터 목록
 
@@ -96,9 +106,42 @@ IT서비스, 가구, 가스유틸리티, 가정용기기와용품, 가정용품,
 
 ## KR account ID (kis_kr)
 
-6576 grs | 6577 bsop_prfi_inrt | 6578 ntin_inrt | 6579 roe_val | 6580 eps | 6581 sps | 6582 bps | 6583 rsrv_rate | 6584 lblt_rate | 6585 bram_depn | 6586 crnt_rate | 6587 quck_rate | 6588 payout_rate | 6589 eva | 6590 ebitda | 6591 ev_ebitda | 6592 sale_account(매출) | 6593 sale_cost | 6594 sale_totl_prfi(매출총이익) | 6595 depr_cost | 6596 sell_mang | 6597 bsop_prti(영업이익) | 6598 bsop_non_ernn | 6599 bsop_non_expn | 6600 op_prfi | 6601 spec_prfi | 6602 spec_loss | 6603 thtr_ntin(순이익) | 6604 cras | 6605 fxas | 6606 total_aset | 6607 flow_lblt | 6608 fix_lblt | 6609 total_lblt | 6610 cpfn | 6611 cfp_surp | 6612 prfi_surp | 6613 total_cptl | 6614 cptl_ntin_rate | 6615 self_cptl_ntin_inrt | 6616 sale_ntin_rate | 6617 sale_totl_rate | 6618 equt_inrt | 6619 totl_aset_inrt
+**주의**: `account_name` 컬럼은 영문 축약 코드(grs, lblt_rate 등)로 저장됨. 한글 키워드(배당/부채/현금 등)로 LIKE 검색 시 0건 반환되므로 **아래 매핑표를 사용해 account_id로 직접 조회**할 것.
 
-reliability: trusted raw flow=6592,6597,6603,6594,6590 | trusted raw point=6580,6581,6582 | caution=6579,6584,6591 | recompute=6576,6577,6578
+성장성: 6576 grs=매출성장률 | 6577 bsop_prfi_inrt=영업이익증가율 | 6578 ntin_inrt=순이익증가율 | 6618 equt_inrt=자기자본증가율 | 6619 totl_aset_inrt=총자산증가율
+수익성: 6579 roe_val=ROE(자기자본이익률) | 6614 cptl_ntin_rate=총자본순이익률 | 6615 self_cptl_ntin_inrt=자기자본순이익증가율 | 6616 sale_ntin_rate=매출액순이익률 | 6617 sale_totl_rate=매출총이익률
+주당지표: 6580 eps=EPS(주당순이익) | 6581 sps=SPS(주당매출) | 6582 bps=BPS(주당순자산)
+안정성: 6583 rsrv_rate=유보율 | 6584 lblt_rate=부채비율 | 6586 crnt_rate=유동비율 | 6587 quck_rate=당좌비율
+배당: 6588 payout_rate=배당성향 (주의: **kis_kr은 DPS(주당배당금)·시가배당률 직접 제공 X**. DPS 필요 시 배당 데이터 부재로 처리)
+기업가치: 6589 eva=EVA | 6590 ebitda=EBITDA | 6591 ev_ebitda=EV/EBITDA
+손익계산서(플로): 6592 sale_account=매출액 | 6593 sale_cost=매출원가 | 6594 sale_totl_prfi=매출총이익 | 6595 depr_cost=감가상각비(**99.99 더미값, 사용 금지**) | 6596 sell_mang=판관비 | 6597 bsop_prti=영업이익 | 6598 bsop_non_ernn=영업외수익 | 6599 bsop_non_expn=영업외비용 | 6600 op_prfi=경상이익 | 6601 spec_prfi=특별이익 | 6602 spec_loss=특별손실 | 6603 thtr_ntin=당기순이익
+재무상태표: 6604 cras=유동자산 | 6605 fxas=비유동자산 | 6606 total_aset=총자산 | 6607 flow_lblt=유동부채 | 6608 fix_lblt=비유동부채 | 6609 total_lblt=총부채 | 6610 cpfn=자본금 | 6611 cfp_surp=자본잉여금 | 6612 prfi_surp=이익잉여금 | 6613 total_cptl=자기자본(총자본)
+
+### 한글 키워드 → account_id 빠른 조회
+- "ROE" / "자기자본이익률" → **6579**.
+- "ROCE" / "투하자본수익률" → 직접 계정 없음. **반드시 아래 공식으로 계산**(ROE로 대체 금지):
+  ```sql
+  -- ROCE = EBIT / Capital Employed = 영업이익(6597) / (총자산(6606) - 유동부채(6607))
+  SELECT fs.year,
+         MAX(CASE WHEN fs.account_id=6597 THEN fs.value END) /
+         NULLIF(MAX(CASE WHEN fs.account_id=6606 THEN fs.value END)
+              - MAX(CASE WHEN fs.account_id=6607 THEN fs.value END), 0) * 100 AS roce_pct
+  FROM financial_statements fs
+  WHERE fs.stock_id = :sid AND fs.account_id IN (6597, 6606, 6607)
+  GROUP BY fs.year
+  ORDER BY fs.year;
+  ```
+- "부채비율" → **6584**. 단 kis_kr 정의(=총부채/자기자본×100)라 ratio 자체 사용. LIKE 검색 금지.
+- "순현금" / "net cash" 직접 계정 없음 → `유동자산(6604) > 총부채(6609)` 조건으로 판정하거나, `자기자본(6613) - 비유동자산(6605)` 근사.
+- "현금성자산" 직접 계정 없음 → kis_kr 한계. 유동자산(6604)으로 근사.
+- "배당수익률" / "DPS" / "주당배당금" → **kis_kr 미제공**. 제공 가능한 것: 배당성향(6588)뿐. 요청 시 "배당 이력/DPS 데이터는 현재 미제공" 고지.
+- "ETF" (한국) → `stocks WHERE country='KR' AND instrument_type='etf'` (1088종목). daily_prices 조인 가능. 주식과 혼동 방지 위해 모든 한국 스크리닝에 `instrument_type` 필터 명시 권장.
+- "ETF" (미국) → `us_stock_snapshots WHERE instrument_type='etf'` (5505종목, 메타만). 가격은 stocks 싱크 전이라 SP1500 외는 daily_prices 미제공 → 종목 리스트/메타까지만 답변.
+- "나스닥" / "NASDAQ" / "거래소" → `us_stock_snapshots.exchange IN ('NAS','NYS','AMS')`가 유일한 US 거래소 소스. 나스닥 주식: `exchange='NAS' AND instrument_type='stock'` (~3,875). stocks와 조인: `stocks.ticker = us_stock_snapshots.symbol`. 한국은 `stocks.market`(KOSPI/KOSDAQ) 직접 사용.
+- "매출" → 6592 | "영업이익" → 6597 | "순이익" → 6603 | "EBITDA" → 6590 | "자본" / "자기자본" → 6613 | "총자산" → 6606
+- "감가상각비" / "depreciation" → **kis_kr은 6595를 99.99 더미로만 채움. 절대 6595를 SELECT하지 말 것.** 역산: `감가상각비 ≈ EBITDA(6590) - 영업이익(6597)` (동일 stock_id/year/quarter 기준). 이 역산 결과를 제시할 때는 "EBITDA와 영업이익 차이로 역산한 근사치"임을 명시.
+
+reliability: trusted raw flow=6592,6597,6603,6594,6590 | trusted raw point=6580,6581,6582 | caution=6579,6584,6591 | recompute=6576,6577,6578 | **DO NOT USE**=6595(더미값)
 
 ## US account ID (stockanalysis, 주요 항목)
 

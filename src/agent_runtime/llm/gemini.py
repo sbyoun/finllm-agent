@@ -37,14 +37,14 @@ def _message_to_gemini_parts(message: dict) -> list[dict[str, Any]]:
 
     tool_calls = message.get("tool_calls") or []
     if tool_calls:
-        rendered_calls: list[str] = []
-        for tool_call in tool_calls:
-            rendered_calls.append(
-                "[Called: {name}] {args}".format(
-                    name=tool_call["function"]["name"],
-                    args=tool_call["function"]["arguments"] or "{}",
-                )
-            )
+        # NOTE: 이전엔 `[Called: name] {args_json}` 형태로 JSON 페이로드까지
+        # 덤프했는데, Gemini(특히 flash)가 이 패턴을 모방해 최종 답변 자리에
+        # SQL/JSON 원본을 그대로 prepend하는 환각이 발생했음. args는 다음 턴의
+        # tool result에 이미 반영되니 여기선 호출 사실만 산문으로 남긴다.
+        rendered_calls = [
+            f"(이전 턴에 {tool_call['function']['name']} 도구를 실행했습니다)"
+            for tool_call in tool_calls
+        ]
         parts.append({"text": "\n".join(rendered_calls)})
     return parts
 

@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from agent_runtime.context.view import View
 from agent_runtime.event.condensation import CondensationEvent
+
+
+def _estimate_view_chars(view: View) -> int:
+    total = 0
+    for event in view.events:
+        if hasattr(event, "to_message_dict"):
+            try:
+                total += len(json.dumps(event.to_message_dict(), ensure_ascii=False))
+            except Exception:
+                total += 200
+    return total
 
 
 @dataclass(slots=True)
@@ -11,9 +23,14 @@ class RollingCondenser:
     max_size: int = 120
     keep_first: int = 4
     target_size: int | None = None
+    max_chars: int | None = None
 
     def should_condense(self, view: View) -> bool:
-        return len(view.events) > self.max_size
+        if len(view.events) > self.max_size:
+            return True
+        if self.max_chars is not None and _estimate_view_chars(view) > self.max_chars:
+            return True
+        return False
 
     def condense(self, view: View) -> CondensationEvent | None:
         if not self.should_condense(view):
