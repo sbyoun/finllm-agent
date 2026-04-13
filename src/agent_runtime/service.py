@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -32,22 +34,59 @@ from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation, mak
 EventCallback = Callable[[dict[str, Any]], None]
 
 
+_SANITIZE_LOGGER = logging.getLogger("agent_runtime.sanitize")
+
+_FENCED_CODE_RE = re.compile(r"```(?:sql|python|SQL|Python)\b.*?```", re.DOTALL)
+_RAW_PRELUDE_RE = re.compile(
+    r"^\s*(?:SELECT|WITH|INSERT|UPDATE|DELETE|import\s|from\s|def\s|async\s+def\s)",
+    re.IGNORECASE,
+)
+
+
 def _sanitize_assistant_message(content: str) -> str:
-    if "TOOL_CALL[" not in content and "TOOL_RESULT[" not in content:
-        return content.strip()
+    original = content
+    removed: list[str] = []
+
+    def _capture_fence(match: re.Match[str]) -> str:
+        removed.append(match.group(0))
+        return ""
+
+    cleaned = _FENCED_CODE_RE.sub(_capture_fence, content)
 
     cleaned_lines: list[str] = []
-    for raw_line in content.splitlines():
+    for raw_line in cleaned.splitlines():
         line = raw_line.strip()
+        if (
+            line.startswith("TOOL_CALL[")
+            or line.startswith("TOOL_RESULT[")
+            or line.startswith("[Called:")
+            or line.startswith("[Result:")
+        ):
+            removed.append(raw_line)
+            continue
         if not line:
             if cleaned_lines and cleaned_lines[-1] != "":
                 cleaned_lines.append("")
             continue
-        if line.startswith("TOOL_CALL[") or line.startswith("TOOL_RESULT["):
-            continue
         cleaned_lines.append(raw_line)
 
-    return "\n".join(cleaned_lines).strip()
+    cleaned = "\n".join(cleaned_lines).strip()
+
+    # Raw SQL/Python prelude: drop leading paragraph(s) until we hit prose.
+    while cleaned and _RAW_PRELUDE_RE.match(cleaned):
+        head, sep, tail = cleaned.partition("\n\n")
+        removed.append(head)
+        cleaned = tail.strip() if sep else ""
+
+    if removed:
+        _SANITIZE_LOGGER.warning(
+            "Stripped leaked tool/script content from assistant message: original_len=%d cleaned_len=%d removed=%s",
+            len(original),
+            len(cleaned),
+            json.dumps(removed, ensure_ascii=False)[:2000],
+        )
+
+    return cleaned
 
 
 def _strip_markdown_tables(content: str) -> str:
@@ -229,6 +268,22 @@ def _build_tools(*, repo_root: Path):
 def _build_agent(*, repo_root: Path, llm_config: RuntimeLlmConfig | None) -> Agent:
     tools = _build_tools(repo_root=repo_root)
     llm = create_llm_client(llm_config) if llm_config else create_default_llm_client()
+    model_name = (llm_config.model if llm_config else "").lower()
+    is_opus = "opus" in model_name
+    if is_opus:
+        # Opus는 prompt caching이 안정적으로 돌면서 30K/min 한도가 사실상 완화됨.
+        # 너무 공격적으로 압축하면 tool result가 요약되어 agent가 같은 SQL을 3번씩
+        # 재실행하는 부작용이 있음 (samsung-points 시나리오에서 관측). 여유를 두고
+        # 자연스럽게 누적되도록 완화.
+        condenser = LLMSummarizingCondenser(
+            llm=llm,
+            max_size=24,
+            target_size=14,
+            keep_first=2,
+            max_chars=100_000,
+        )
+    else:
+        condenser = LLMSummarizingCondenser(llm=llm, max_size=24, keep_first=2)
     return Agent(
         llm=llm,
         tools=tools,
@@ -236,7 +291,7 @@ def _build_agent(*, repo_root: Path, llm_config: RuntimeLlmConfig | None) -> Age
         repo_root=str(repo_root),
         skill_files=DEFAULT_SKILL_FILES,
         skill_files_compact=DEFAULT_SKILL_FILES_COMPACT,
-        condenser=LLMSummarizingCondenser(llm=llm, max_size=24, keep_first=2),
+        condenser=condenser,
     )
 
 
@@ -513,7 +568,23 @@ def _build_result(
         mode = "clarification"
         clarification_question = "질문을 처리하는 중 오류가 발생했습니다. 조건이나 대상을 조금 더 구체적으로 알려 주세요."
         final_message = "질문을 처리하는 중 오류가 발생했습니다."
-    elif not final_message and dataset:
+
+    # 환각 fallback 가드 — datasets가 비어 있고 SQL을 2회 이상 시도한 세션은,
+    # status가 finished(환각 위험)든 error(일반 에러 메시지로 떨어짐)든 관계없이
+    # 사과 문구로 override. news_call_count는 체크하지 않음 — news>0이어도 datasets가
+    # 비어 있으면 결국 수치 근거 없이 답변하는 것이고, 정상 뉴스 답변(팔란티어)은
+    # 가격 SQL로 datasets>=1이 잡혀 여기 걸리지 않음.
+    if mode != "tool-result" and not datasets and sql_call_count >= 2:
+        mode = "clarification"
+        clarification_question = "조건이나 대상을 조금 더 구체적으로 알려 주시면 다시 시도해볼게요."
+        final_message = (
+            "죄송합니다. 요청하신 조건에 맞는 데이터를 정확히 조회하지 못했어요. "
+            "탐색 과정에서 필요한 계정·지표·유니버스에 닿지 못해 신뢰할 수 있는 답변을 드릴 수 없는 상황입니다. "
+            "조건이나 대상을 조금 더 구체적으로 알려 주시면 다시 시도해볼게요."
+        )
+        execution_log.append("fallback:no-final-sql-hallucination-guard")
+
+    if not final_message and dataset:
         final_message = "데이터 조회 결과를 정리했습니다. 우측 데이터 패널에서 확인해 주세요."
     elif not final_message:
         mode = "clarification"

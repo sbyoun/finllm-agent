@@ -388,9 +388,40 @@ def scenario_7():
 
 
 # ============================================================
+def scenario_8():
+    """Heavy analysis — 삼성전자 DCF 자율 실행 (long-loop stress test)"""
+    print(f"\n{'='*70}\n  S8: Heavy DCF (삼성전자)\n{'='*70}")
+    S, sid = "8", "test-s8"
+
+    q = (
+        "너에게 주어진 모든 스킬과 툴, 데이터베이스, 뉴스데이터 등을 이용해서 "
+        "세계 최고의 헤지펀드급 삼성전자 DCF를 진행해줘.\n"
+        "나에게 출력할 것은\n"
+        "1. 매출 추정 방법과 논리(근거)\n"
+        "2. 세가지 시나리오의 핵심 트리거\n"
+        "3. 현재 데이터 기반 각 시나리오의 확률을 제공해주고 가중평균한 DCF 결과 값\n"
+        "모든 판단은 자율적으로 해서 최상의 결과를 나에게 줘."
+    )
+    r = run_turn(q, [], sid)
+    print_turn(S, 1, q, r)
+
+    msg = r.get("decision", {}).get("assistantMessage", "")
+    exec_log = r.get("executionLog", [])
+    metrics = r.get("metrics", {})
+
+    ok = True
+    ok &= check(S, "non-empty answer", bool(msg.strip()) and "답변을 완성하지 못했습니다" not in msg and len(msg.strip()) > 200)
+    ok &= check(S, "no rate limit failure", "rate_limit" not in str(exec_log).lower() and "429" not in str(exec_log))
+    ok &= check(S, "mentions 삼성전자", "삼성전자" in msg or "005930" in msg)
+    ok &= check(S, "mentions DCF or 시나리오", any(kw in msg for kw in ["DCF", "시나리오", "현금흐름", "할인"]))
+    ok &= check(S, "tool calls made", metrics.get("toolCallCount", 0) > 0, f"tools={metrics.get('toolCallCount')}")
+    return ok
+
+
+# ============================================================
 if __name__ == "__main__":
     scenarios = {"1": scenario_1, "2": scenario_2, "3": scenario_3, "4": scenario_4,
-                 "5": scenario_5, "6": scenario_6, "7": scenario_7}
+                 "5": scenario_5, "6": scenario_6, "7": scenario_7, "8": scenario_8}
     targets = sys.argv[1:] if len(sys.argv) > 1 else sorted(scenarios.keys())
     results = {}
 
