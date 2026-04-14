@@ -57,8 +57,8 @@ class SearchNewsTool(ToolDefinition):
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "country": {"type": "string"},
-                "search_lang": {"type": "string"},
+                "country": {"type": "string", "description": "ISO country code. DEFAULT 'KR'. Only set to a non-Korean code when the user explicitly asks about that specific foreign region."},
+                "search_lang": {"type": "string", "description": "Search language. DEFAULT 'ko'. Match the country: use 'en' only when country is set to a non-Korean region per user request."},
                 "freshness": {"type": "string"},
                 "count": {"type": "integer"},
             },
@@ -118,7 +118,7 @@ def _search_brave_news(action: SearchNewsAction) -> SearchNewsObservation:
 def make_search_news_tool() -> SearchNewsTool:
     return SearchNewsTool(
         name="search_news",
-        description="Search recent news and return structured news rows. IMPORTANT: call this tool one at a time — do NOT call multiple search_news in parallel. Sequential calls only.",
+        description="Search recent news and return structured news rows. REGION DEFAULT: country='KR' / search_lang='ko'. Do NOT switch to US/global unless the user explicitly named a non-Korean region. IMPORTANT: call this tool one at a time — do NOT call multiple search_news in parallel. Sequential calls only.",
         action_type=SearchNewsAction,
         observation_type=SearchNewsObservation,
         executor=lambda action, conversation=None: _search_brave_news(action),  # noqa: ARG005

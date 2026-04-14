@@ -93,6 +93,7 @@ def make_run_sql_tool(runner: SQLRunner) -> RunSQLTool:
         name="run_sql",
         description=(
             "Execute SQL query. "
+            "REGION DEFAULT: when the user did NOT specify a region, filter to Korea only (country='KR'). Do NOT query US/global without an explicit user request. "
             "NEVER use SYSDATE/CURRENT_DATE/today's date — use MAX(\"date\") subquery instead. "
             "0 rows → retry with MAX(\"date\") or broader filters. "
             "role='final'(default) for data queries; role='diagnostic' ONLY for schema lookups. "
