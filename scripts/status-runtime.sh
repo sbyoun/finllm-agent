@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUNTIME_SERVICE_NAME="${RUNTIME_SERVICE_NAME:-financial-agent-runtime-py}"
-RUNTIME_PORT="${RUNTIME_PORT:-8010}"
+RUNTIME_SERVICE_NAME="${RUNTIME_SERVICE_NAME:-financial-agent-runtime-py-staging}"
+RUNTIME_PORT="${RUNTIME_PORT:-8001}"
 
 echo "== systemd =="
 systemctl --user status "$RUNTIME_SERVICE_NAME" --no-pager || true

@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TARGET_ENV="production"
+TARGET_ENV="staging"
 
 if [[ "${1:-}" == "--env" ]]; then
   TARGET_ENV="${2:-}"
