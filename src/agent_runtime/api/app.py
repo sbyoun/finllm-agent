@@ -12,7 +12,6 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent_runtime.kis.quote import kis_quote
 from agent_runtime.llm import RuntimeLlmConfig
 from agent_runtime.service import RuntimeAgentRequest, RuntimeMessageContext, run_agent_request, run_agent_request_json
 
@@ -69,15 +68,6 @@ def _resolve_repo_root() -> Path:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@app.get("/kis/quote")
-def kis_quote_endpoint(symbol: str) -> JSONResponse:
-    try:
-        quote = kis_quote(symbol)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": str(exc)}, status_code=502)
-    return JSONResponse(quote)
 
 
 @app.post("/runs/sync")
