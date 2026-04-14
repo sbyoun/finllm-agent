@@ -576,7 +576,7 @@ def _build_result(
     # 사과 문구로 override. news_call_count는 체크하지 않음 — news>0이어도 datasets가
     # 비어 있으면 결국 수치 근거 없이 답변하는 것이고, 정상 뉴스 답변(팔란티어)은
     # 가격 SQL로 datasets>=1이 잡혀 여기 걸리지 않음.
-    if mode != "tool-result" and not datasets and sql_call_count >= 2:
+    if mode != "tool-result" and not datasets and sql_call_count >= 2 and len(final_message.strip()) < 200:
         mode = "clarification"
         clarification_question = "조건이나 대상을 조금 더 구체적으로 알려 주시면 다시 시도해볼게요."
         final_message = (
