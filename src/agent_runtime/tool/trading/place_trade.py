@@ -23,6 +23,7 @@ from agent_runtime.tool.tool import ToolDefinition
 
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("FOLDALPHA_TELEGRAM_BOT_TOKEN", "").strip()
 
 BUY_FEE_RATE = 0.00015   # 0.015% 위탁수수료
 SELL_FEE_RATE = 0.00195  # 0.015% + 0.18% 거래세
@@ -82,6 +83,75 @@ def _get_or_create_portfolio(user_id: str, portfolio_id: str | None) -> dict:
     if not created:
         raise RuntimeError("포트폴리오 자동 생성 실패")
     return created[0] if isinstance(created, list) else created
+
+
+def _send_telegram(chat_id: str, text: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    body = json.dumps({"chat_id": chat_id, "text": text}).encode()
+    req = Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urlopen(req, timeout=10) as resp:
+            resp.read()
+    except Exception:
+        pass
+
+
+def _notify_trade(user_id: str, portfolio_name: str, message: str) -> None:
+    """Append to trading-{user_id} chat session and send Telegram if connected."""
+    import uuid
+    session_id = f"trading-{user_id}"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        existing = _supabase_request(
+            f"chat_sessions?user_id=eq.{user_id}&session_id=eq.{session_id}&select=session_id"
+        )
+        if not existing:
+            _supabase_request(
+                "chat_sessions",
+                method="POST",
+                body={
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "title": "📈 페이퍼 트레이딩",
+                    "result_json": {},
+                    "updated_at": now_iso,
+                },
+                prefer="return=minimal",
+            )
+        _supabase_request(
+            "chat_messages",
+            method="POST",
+            body={
+                "user_id": user_id,
+                "session_id": session_id,
+                "message_id": f"assistant-{uuid.uuid4()}",
+                "role": "assistant",
+                "content": f"[{portfolio_name}]\n{message}",
+                "created_at": now_iso,
+            },
+            prefer="return=minimal",
+        )
+        _supabase_request(
+            f"chat_sessions?user_id=eq.{user_id}&session_id=eq.{session_id}",
+            method="PATCH",
+            body={"updated_at": now_iso},
+            prefer="return=minimal",
+        )
+    except Exception:
+        pass
+
+    try:
+        tg = _supabase_request(
+            f"telegram_connections?user_id=eq.{user_id}&select=telegram_chat_id"
+        )
+        if tg:
+            chat_id = tg[0].get("telegram_chat_id")
+            if chat_id:
+                _send_telegram(str(chat_id), f"[{portfolio_name}]\n{message}")
+    except Exception:
+        pass
 
 
 def _get_position(portfolio_id: str, symbol: str) -> dict | None:
@@ -305,6 +375,20 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
         )
     except Exception:
         pass
+
+    # Notify (chat session + telegram, best-effort)
+    obs_for_text = PlaceTradeObservation(
+        success=True,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        price=price,
+        fee=fee,
+        realized_pnl=realized_pnl,
+        new_qty=new_qty,
+        new_avg_cost=new_avg_cost,
+    )
+    _notify_trade(user_id, portfolio.get("name") or "포트폴리오", obs_for_text.to_text())
 
     return PlaceTradeObservation(
         success=True,
