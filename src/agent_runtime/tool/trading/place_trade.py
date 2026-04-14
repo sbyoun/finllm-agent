@@ -53,6 +53,21 @@ def _supabase_request(
         return json.loads(raw)
 
 
+def _create_portfolio(user_id: str, name: str) -> dict:
+    created = _supabase_request(
+        "trading_portfolios",
+        method="POST",
+        body={
+            "user_id": user_id,
+            "name": name or "새 포트폴리오",
+            "is_primary": False,
+        },
+    )
+    if not created:
+        raise RuntimeError("포트폴리오 생성 실패")
+    return created[0] if isinstance(created, list) else created
+
+
 def _get_or_create_portfolio(user_id: str, portfolio_id: str | None) -> dict:
     if portfolio_id:
         rows = _supabase_request(
@@ -154,6 +169,25 @@ def _notify_trade(user_id: str, portfolio_name: str, message: str) -> None:
         pass
 
 
+_NAME_CACHE: dict[str, str] = {}
+
+
+def _lookup_stock_name(symbol: str) -> str:
+    if symbol in _NAME_CACHE:
+        return _NAME_CACHE[symbol]
+    try:
+        from agent_runtime.tool.sql.oracle import OracleSQLRunner
+        runner = OracleSQLRunner()
+        _, rows = runner(f"SELECT name FROM stocks WHERE ticker = '{symbol}' AND ROWNUM = 1")
+        if rows:
+            name = str(rows[0].get("name") or "")
+            _NAME_CACHE[symbol] = name
+            return name
+    except Exception:
+        pass
+    return ""
+
+
 def _get_position(portfolio_id: str, symbol: str) -> dict | None:
     rows = _supabase_request(
         f"trading_positions?portfolio_id=eq.{portfolio_id}&symbol=eq.{symbol}&select=*"
@@ -169,6 +203,7 @@ class PlaceTradeAction(Action):
     side: str = ""
     qty: int = 0
     portfolio_id: str = ""
+    new_portfolio_name: str = ""
 
     def to_arguments_json(self) -> str:
         return json.dumps(
@@ -177,6 +212,7 @@ class PlaceTradeAction(Action):
                 "side": self.side,
                 "qty": self.qty,
                 "portfolio_id": self.portfolio_id or None,
+                "new_portfolio_name": self.new_portfolio_name or None,
             },
             ensure_ascii=False,
         )
@@ -195,13 +231,15 @@ class PlaceTradeObservation(Observation):
     realized_pnl: int | None = None
     new_qty: int = 0
     new_avg_cost: float = 0.0
+    name: str = ""
 
     def to_text(self) -> str:
         if not self.success:
-            return f"place_trade 실패: {self.message}"
+            return f"체결 실패: {self.message}"
         side_kr = "매수" if self.side in ("buy", "manual_buy") else "매도"
+        label = f"{self.name}({self.symbol})" if self.name else str(self.symbol)
         lines = [
-            f"[페이퍼 체결] {self.symbol} {side_kr} {self.qty}주 @{self.price:,}원",
+            f"[페이퍼 체결] {label} {side_kr} {self.qty}주 @{self.price:,}원",
             f"수수료 {self.fee:,}원",
             f"보유 후: {self.new_qty}주 (평균단가 {self.new_avg_cost:,.2f}원)",
         ]
@@ -232,6 +270,24 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
         return PlaceTradeObservation(success=False, message="symbol 이 필요합니다.")
     symbol = symbol.zfill(6) if symbol.isdigit() else symbol
 
+    gate = state.get_agent_state("trade_gate") if state else None
+    if gate and gate.get("allowed_symbols") is not None:
+        allowed = set(gate["allowed_symbols"])
+        if symbol not in allowed:
+            blocks = int(state.get_agent_state("trade_gate_blocks") or 0) + 1 if state else 1
+            block_msg = (
+                f"STOP. 종목 {symbol}은 사용자 지시·직전 분석 어느 쪽에도 없어 차단되었습니다. "
+                f"허용된 종목: {sorted(allowed)}. 다른 종목으로 재시도하지 말고, 즉시 사용자에게 "
+                f"'요청하신 종목은 직전 맥락에 없어 매수하지 않았습니다. 어떤 종목을 매수할지 알려주세요' "
+                f"라고 알린 뒤 종료하세요."
+            )
+            if state:
+                state.set_agent_state("trade_gate_blocks", blocks)
+                state.set_agent_state("trade_gate_last_block", block_msg)
+                state.set_agent_state("trade_gate_blocked_symbols",
+                    list(state.get_agent_state("trade_gate_blocked_symbols") or []) + [symbol])
+            return PlaceTradeObservation(success=False, message=block_msg)
+
     try:
         qty = int(action.qty)
     except (TypeError, ValueError):
@@ -241,10 +297,15 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
 
     # Portfolio
     try:
-        portfolio = _get_or_create_portfolio(user_id, action.portfolio_id or None)
+        if action.new_portfolio_name and not action.portfolio_id:
+            portfolio = _create_portfolio(user_id, action.new_portfolio_name.strip())
+        else:
+            portfolio = _get_or_create_portfolio(user_id, action.portfolio_id or None)
     except Exception as exc:  # noqa: BLE001
         return PlaceTradeObservation(success=False, message=f"포트폴리오 조회 실패: {exc}")
     portfolio_id = portfolio["id"]
+
+    stock_name = _lookup_stock_name(symbol)
 
     # Quote
     try:
@@ -296,7 +357,7 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
                 _supabase_request(
                     f"trading_positions?portfolio_id=eq.{portfolio_id}&symbol=eq.{symbol}",
                     method="PATCH",
-                    body={"qty": new_qty, "avg_cost": new_avg_cost, "updated_at": now_iso},
+                    body={"qty": new_qty, "avg_cost": new_avg_cost, "name": stock_name or None, "updated_at": now_iso},
                 )
             else:
                 _supabase_request(
@@ -305,6 +366,7 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
                     body={
                         "portfolio_id": portfolio_id,
                         "symbol": symbol,
+                        "name": stock_name or None,
                         "qty": new_qty,
                         "avg_cost": new_avg_cost,
                         "updated_at": now_iso,
@@ -337,6 +399,7 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
         trade_row: dict[str, Any] = {
             "portfolio_id": portfolio_id,
             "symbol": symbol,
+            "name": stock_name or None,
             "side": side,
             "qty": qty,
             "price": price,
@@ -380,6 +443,7 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
     obs_for_text = PlaceTradeObservation(
         success=True,
         symbol=symbol,
+        name=stock_name,
         side=side,
         qty=qty,
         price=price,
@@ -395,6 +459,7 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
         message="",
         portfolio_id=portfolio_id,
         symbol=symbol,
+        name=stock_name,
         side=side,
         qty=qty,
         price=price,
@@ -427,7 +492,11 @@ class PlaceTradeTool(ToolDefinition):
                 },
                 "portfolio_id": {
                     "type": "string",
-                    "description": "선택. 미지정 시 사용자의 primary 포트폴리오를 사용하며, 없으면 자동 생성.",
+                    "description": "선택. 기존 포트폴리오 ID를 지정하면 해당 포트폴리오에 체결한다. 미지정 시 사용자의 primary 포트폴리오를 사용한다.",
+                },
+                "new_portfolio_name": {
+                    "type": "string",
+                    "description": "선택. 사용자가 '새 포트폴리오를 만들어' 와 같이 신규 포트폴리오 생성을 명시한 경우에만 이름을 넣는다. 같은 세션에서 여러 종목을 같은 새 포트폴리오에 담으려면 첫 호출에서 받은 portfolio_id 를 이후 호출에 portfolio_id 로 전달하라.",
                 },
             },
             "required": ["symbol", "side", "qty"],

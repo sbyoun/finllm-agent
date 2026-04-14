@@ -28,8 +28,9 @@ from agent_runtime.tool.portfolio import make_get_portfolio_tool
 from agent_runtime.tool.sql import RunSQLAction, RunSQLObservation, make_run_sql_tool
 from agent_runtime.tool.sql.oracle import OracleSQLRunner
 from agent_runtime.tool.jobs.register_job import make_register_job_tool
-from agent_runtime.tool.trading import make_place_trade_tool
+from agent_runtime.tool.trading import make_list_portfolios_tool, make_place_trade_tool
 from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation, make_run_backtest_tool
+from agent_runtime.tool.trading.place_trade import PlaceTradeObservation
 
 
 EventCallback = Callable[[dict[str, Any]], None]
@@ -263,6 +264,7 @@ def _build_tools(*, repo_root: Path):
         make_run_sql_tool(OracleSQLRunner()),
         make_register_job_tool(),
         make_place_trade_tool(),
+        make_list_portfolios_tool(),
         make_run_backtest_tool(),
     ]
 
@@ -510,10 +512,14 @@ def _build_result(
 
     # Check for backtest observation
     last_backtest_obs: RunBacktestObservation | None = None
+    place_trade_obs: list[PlaceTradeObservation] = []
     for event in run_events:
         if isinstance(event, ObservationEvent) and isinstance(event.observation, RunBacktestObservation):
             if event.observation.success:
                 last_backtest_obs = event.observation
+        if isinstance(event, ObservationEvent) and isinstance(event.observation, PlaceTradeObservation):
+            if event.observation.success:
+                place_trade_obs.append(event.observation)
 
     if last_backtest_obs:
         columns = [
@@ -542,6 +548,49 @@ def _build_result(
                 type="table",
                 title="백테스트 분기별 성과",
                 preferredColumns=["period", "return_pct", "benchmark_pct", "excess_pct", "holdings"],
+            ),
+        )
+    elif place_trade_obs:
+        columns = [
+            RuntimeDataColumn(key="symbol", label="종목"),
+            RuntimeDataColumn(key="side", label="구분"),
+            RuntimeDataColumn(key="qty", label="수량"),
+            RuntimeDataColumn(key="price", label="체결가"),
+            RuntimeDataColumn(key="fee", label="수수료"),
+            RuntimeDataColumn(key="realized_pnl", label="실현손익"),
+            RuntimeDataColumn(key="new_qty", label="보유수량"),
+            RuntimeDataColumn(key="new_avg_cost", label="평균단가"),
+        ]
+        rows = [
+            {
+                "symbol": f"{o.name}({o.symbol})" if o.name else o.symbol,
+                "side": "매수" if o.side in ("buy", "manual_buy") else "매도",
+                "qty": o.qty,
+                "price": o.price,
+                "fee": o.fee,
+                "realized_pnl": o.realized_pnl if o.realized_pnl is not None else "-",
+                "new_qty": o.new_qty,
+                "new_avg_cost": round(o.new_avg_cost, 2),
+            }
+            for o in place_trade_obs
+        ]
+        dataset = RuntimeAnalysisDataset(
+            title="페이퍼 체결 결과",
+            description=f"{len(place_trade_obs)}건 체결 완료",
+            columns=columns,
+            rows=rows,
+        )
+        datasets = [dataset]
+        mode = "tool-result"
+        final_message = _strip_markdown_tables(final_message)
+        tool_request = RuntimeToolRequest(
+            kind="place_trade",
+            sql="",
+            reason="Paper trade executed",
+            display=RuntimeDisplaySpec(
+                type="table",
+                title="페이퍼 체결 결과",
+                preferredColumns=["symbol", "side", "qty", "price", "new_qty", "new_avg_cost"],
             ),
         )
     elif last_sql_action and last_sql_observation and last_sql_observation.row_count > 0:
@@ -585,6 +634,19 @@ def _build_result(
             "조건이나 대상을 조금 더 구체적으로 알려 주시면 다시 시도해볼게요."
         )
         execution_log.append("fallback:no-final-sql-hallucination-guard")
+
+    gate_blocks = int(conversation.state.get_agent_state("trade_gate_blocks") or 0)
+    if gate_blocks > 0 and not place_trade_obs:
+        blocked_syms = conversation.state.get_agent_state("trade_gate_blocked_symbols") or []
+        gate = conversation.state.get_agent_state("trade_gate") or {}
+        allowed = sorted(gate.get("allowed_symbols") or [])
+        final_message = (
+            f"요청하신 종목({', '.join(blocked_syms) or '해당 종목'})은 직전 분석 맥락에 없어 매수하지 않았습니다. "
+            f"직전 맥락에 있는 종목은 {allowed if allowed else '없음'} 입니다. "
+            f"어떤 종목을, 몇 주 매수할지 명시해 주시면 다시 시도하겠습니다."
+        )
+        mode = "answer-only"
+        execution_log.append(f"trade_gate_blocked:{gate_blocks}")
 
     if not final_message and dataset:
         final_message = "데이터 조회 결과를 정리했습니다. 우측 데이터 패널에서 확인해 주세요."
@@ -711,6 +773,18 @@ def run_agent_request(
         conversation.state.set_agent_state("session_id", request.session_id)
     compacted_history = _compact_history(request.history, agent.llm)
     _hydrate_history(conversation, compacted_history)
+    from agent_runtime.tool.trading.trade_gate import compute_trade_gate
+    prior_assistant_text = ""
+    snap = request.state_snapshot or {}
+    prev = snap.get("previousResult") if isinstance(snap, dict) else None
+    if isinstance(prev, dict):
+        prior_assistant_text = str(prev.get("summary") or "")
+    trade_gate = compute_trade_gate(
+        question=request.question,
+        history=compacted_history,
+        prior_assistant_text=prior_assistant_text,
+    )
+    conversation.state.set_agent_state("trade_gate", trade_gate)
     conversation.send_message(request.question)
     run_start_index = len(conversation.state.event_log) - 1
 
@@ -753,6 +827,10 @@ def run_agent_request(
         seen_events = len(events)
 
         iteration += 1
+        gate_blocks = int(conversation.state.get_agent_state("trade_gate_blocks") or 0)
+        if gate_blocks >= 2:
+            conversation.state.execution_status = ConversationExecutionStatus.FINISHED
+            break
         if iteration >= conversation.state.max_iterations:
             conversation.state.execution_status = ConversationExecutionStatus.ERROR
             _emit(
