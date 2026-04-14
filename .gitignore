@@ -9,3 +9,5 @@ build/
 !.env.example
 logs/
 results/
+
+.claude/
