@@ -28,9 +28,14 @@ from agent_runtime.tool.portfolio import make_get_portfolio_tool
 from agent_runtime.tool.sql import RunSQLAction, RunSQLObservation, make_run_sql_tool
 from agent_runtime.tool.sql.oracle import OracleSQLRunner
 from agent_runtime.tool.jobs.register_job import make_register_job_tool
-from agent_runtime.tool.trading import make_list_portfolios_tool, make_place_trade_tool
+from agent_runtime.tool.trading import (
+    make_list_portfolios_tool,
+    make_place_trade_tool,
+    make_prepare_trade_tool,
+)
 from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation, make_run_backtest_tool
 from agent_runtime.tool.trading.place_trade import PlaceTradeObservation
+from agent_runtime.tool.trading.prepare_trade import PrepareTradeObservation
 
 
 EventCallback = Callable[[dict[str, Any]], None]
@@ -263,6 +268,7 @@ def _build_tools(*, repo_root: Path):
         make_search_news_tool(),
         make_run_sql_tool(OracleSQLRunner()),
         make_register_job_tool(),
+        make_prepare_trade_tool(),
         make_place_trade_tool(),
         make_list_portfolios_tool(),
         make_run_backtest_tool(),
@@ -513,6 +519,7 @@ def _build_result(
     # Check for backtest observation
     last_backtest_obs: RunBacktestObservation | None = None
     place_trade_obs: list[PlaceTradeObservation] = []
+    prepare_trade_obs: list[PrepareTradeObservation] = []
     for event in run_events:
         if isinstance(event, ObservationEvent) and isinstance(event.observation, RunBacktestObservation):
             if event.observation.success:
@@ -520,6 +527,9 @@ def _build_result(
         if isinstance(event, ObservationEvent) and isinstance(event.observation, PlaceTradeObservation):
             if event.observation.success:
                 place_trade_obs.append(event.observation)
+        if isinstance(event, ObservationEvent) and isinstance(event.observation, PrepareTradeObservation):
+            if event.observation.success:
+                prepare_trade_obs.append(event.observation)
 
     if last_backtest_obs:
         columns = [
@@ -635,19 +645,6 @@ def _build_result(
         )
         execution_log.append("fallback:no-final-sql-hallucination-guard")
 
-    gate_blocks = int(conversation.state.get_agent_state("trade_gate_blocks") or 0)
-    if gate_blocks > 0 and not place_trade_obs:
-        blocked_syms = conversation.state.get_agent_state("trade_gate_blocked_symbols") or []
-        gate = conversation.state.get_agent_state("trade_gate") or {}
-        allowed = sorted(gate.get("allowed_symbols") or [])
-        final_message = (
-            f"요청하신 종목({', '.join(blocked_syms) or '해당 종목'})은 직전 분석 맥락에 없어 매수하지 않았습니다. "
-            f"직전 맥락에 있는 종목은 {allowed if allowed else '없음'} 입니다. "
-            f"어떤 종목을, 몇 주 매수할지 명시해 주시면 다시 시도하겠습니다."
-        )
-        mode = "answer-only"
-        execution_log.append(f"trade_gate_blocked:{gate_blocks}")
-
     if not final_message and dataset:
         final_message = "데이터 조회 결과를 정리했습니다. 우측 데이터 패널에서 확인해 주세요."
     elif not final_message:
@@ -655,6 +652,28 @@ def _build_result(
         clarification_question = "답변을 완성하지 못했습니다. 같은 질문을 다시 시도하거나 조건을 조금 더 구체적으로 알려 주세요."
         final_message = "답변을 완성하지 못했습니다. 다시 시도해 주세요."
         execution_log.append("fallback:empty-final-message")
+
+    # Nonce marker: append a machine-parsable payload so the web chat can
+    # render an inline approval card. Only attach the latest pending nonce.
+    if prepare_trade_obs:
+        latest = prepare_trade_obs[-1]
+        try:
+            marker_payload = json.dumps(
+                {
+                    "nonce": latest.nonce,
+                    "expires_at": latest.expires_at,
+                    "preview_text": latest.preview_text,
+                    "mode": latest.mode,
+                },
+                ensure_ascii=False,
+            )
+            if latest.nonce and f"[TRADE_NONCE]" not in final_message:
+                final_message = (
+                    (final_message.rstrip() + "\n\n" if final_message else "")
+                    + f"[TRADE_NONCE]{marker_payload}[/TRADE_NONCE]"
+                )
+        except Exception:
+            pass
 
     decision = RuntimePlannerDecision(
         mode=mode,
@@ -773,18 +792,17 @@ def run_agent_request(
         conversation.state.set_agent_state("session_id", request.session_id)
     compacted_history = _compact_history(request.history, agent.llm)
     _hydrate_history(conversation, compacted_history)
-    from agent_runtime.tool.trading.trade_gate import compute_trade_gate
-    prior_assistant_text = ""
+    # Nonce protocol: trade gating now happens via prepare_trade → user UI approval
+    # → place_trade/register_job with nonce. No regex-based pre-gate here.
     snap = request.state_snapshot or {}
-    prev = snap.get("previousResult") if isinstance(snap, dict) else None
-    if isinstance(prev, dict):
-        prior_assistant_text = str(prev.get("summary") or "")
-    trade_gate = compute_trade_gate(
-        question=request.question,
-        history=compacted_history,
-        prior_assistant_text=prior_assistant_text,
-    )
-    conversation.state.set_agent_state("trade_gate", trade_gate)
+    scheduled_job_id = snap.get("scheduled_job_id") if isinstance(snap, dict) else None
+    if scheduled_job_id:
+        conversation.state.set_agent_state("scheduled_job_id", scheduled_job_id)
+        conversation.state.set_agent_state("state_snapshot", snap)
+        from agent_runtime.tool.jobs.register_job import parse_trade_spec
+        spec = parse_trade_spec(request.question)
+        if spec:
+            conversation.state.set_agent_state("scheduled_trade_spec", spec)
     conversation.send_message(request.question)
     run_start_index = len(conversation.state.event_log) - 1
 
@@ -827,10 +845,6 @@ def run_agent_request(
         seen_events = len(events)
 
         iteration += 1
-        gate_blocks = int(conversation.state.get_agent_state("trade_gate_blocks") or 0)
-        if gate_blocks >= 2:
-            conversation.state.execution_status = ConversationExecutionStatus.FINISHED
-            break
         if iteration >= conversation.state.max_iterations:
             conversation.state.execution_status = ConversationExecutionStatus.ERROR
             _emit(

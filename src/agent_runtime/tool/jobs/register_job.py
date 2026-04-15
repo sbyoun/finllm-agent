@@ -66,13 +66,53 @@ class RegisterJobAction(Action):
     question: str = ""
     cron_expression: str = ""
     enabled: bool = True
+    trade_specs: list[dict] | None = None
+    on_failure: str = "skip"          # skip | retry_next_run
+    max_runs: int | None = None       # None = 무기한, 1 = 1회성
+    price_max: int | None = None      # 매수 상한가 (KRW)
+    price_min: int | None = None      # 매도 하한가 (KRW)
+    nonce: str | None = None          # required for trade jobs
 
     def to_arguments_json(self) -> str:
         return json.dumps({
             "question": self.question,
             "cron_expression": self.cron_expression,
             "enabled": self.enabled,
+            "trade_specs": self.trade_specs,
+            "on_failure": self.on_failure,
+            "max_runs": self.max_runs,
+            "price_max": self.price_max,
+            "price_min": self.price_min,
+            "nonce": self.nonce,
         }, ensure_ascii=False)
+
+
+TRADE_SPEC_OPEN = "[TRADE_SPEC]"
+TRADE_SPEC_CLOSE = "[/TRADE_SPEC]"
+
+
+def _encode_trade_spec(action: RegisterJobAction) -> str:
+    if not action.trade_specs:
+        return ""
+    spec = {
+        "orders": action.trade_specs,
+        "on_failure": action.on_failure or "skip",
+        "max_runs": action.max_runs,
+        "price_max": action.price_max,
+        "price_min": action.price_min,
+    }
+    return f"\n\n{TRADE_SPEC_OPEN}{json.dumps(spec, ensure_ascii=False)}{TRADE_SPEC_CLOSE}"
+
+
+def parse_trade_spec(question: str) -> dict | None:
+    if not question or TRADE_SPEC_OPEN not in question:
+        return None
+    try:
+        start = question.index(TRADE_SPEC_OPEN) + len(TRADE_SPEC_OPEN)
+        end = question.index(TRADE_SPEC_CLOSE, start)
+        return json.loads(question[start:end])
+    except (ValueError, json.JSONDecodeError):
+        return None
 
 
 @dataclass(slots=True)
@@ -126,14 +166,75 @@ def _execute(action: RegisterJobAction, conversation: Any) -> RegisterJobObserva
     # 4. Compute next_run_at
     next_run_at = _parse_next_run(cron)
 
+    # 4.5 Validate trade_specs if present
+    consumed_nonce_row: dict | None = None
+    if action.trade_specs:
+        for o in action.trade_specs:
+            if not isinstance(o, dict):
+                return RegisterJobObservation(success=False, message="trade_specs 항목은 객체여야 합니다.")
+            if not o.get("symbol") or o.get("side") not in ("buy", "sell"):
+                return RegisterJobObservation(success=False, message=f"trade_specs 항목이 불완전합니다: {o}")
+            try:
+                if int(o.get("qty", 0)) <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return RegisterJobObservation(success=False, message=f"trade_specs qty 가 1 이상 정수여야 합니다: {o}")
+
+        # Nonce required for trade jobs.
+        if not action.nonce:
+            return RegisterJobObservation(
+                success=False,
+                message=(
+                    "STOP. 거래 스케줄 잡은 prepare_trade 로 발급받은 nonce 가 필요합니다. "
+                    "prepare_trade(mode='scheduled', ...) 호출 → 사용자 UI 승인 → nonce 첨부 후 register_job 호출. "
+                    "자연어 '예/네' 는 승인으로 간주되지 않습니다."
+                ),
+            )
+        # Build spec_hash: support only single-order trade jobs in MVP.
+        if len(action.trade_specs) != 1:
+            return RegisterJobObservation(
+                success=False,
+                message="현재는 단일 주문 스케줄 잡만 지원합니다 (trade_specs 길이 1).",
+            )
+        first = action.trade_specs[0]
+        spec_for_hash: dict[str, Any] = {
+            "symbol": str(first.get("symbol", "")).zfill(6),
+            "side": str(first.get("side", "")).lower(),
+            "qty": int(first.get("qty") or 0),
+        }
+        if action.price_max is not None:
+            spec_for_hash["price_max"] = int(action.price_max)
+        if action.price_min is not None:
+            spec_for_hash["price_min"] = int(action.price_min)
+        if cron:
+            spec_for_hash["cron"] = cron
+        if action.max_runs is not None:
+            spec_for_hash["max_runs"] = int(action.max_runs)
+        if action.on_failure:
+            spec_for_hash["on_failure"] = action.on_failure
+
+        from agent_runtime.tool.trading.prepare_trade import hash_spec as _hash_spec
+        from agent_runtime.tool.trading.place_trade import consume_nonce as _consume_nonce
+        spec_hash = _hash_spec(spec_for_hash)
+        consumed_nonce_row = _consume_nonce(action.nonce, user_id, spec_hash)
+        if not consumed_nonce_row:
+            return RegisterJobObservation(
+                success=False,
+                message=(
+                    "STOP. 유효하지 않거나 만료된 nonce 입니다. prepare_trade 로 새 nonce 를 발급받아 재시도하세요. "
+                    "(spec drift / 미승인 / 만료 중 하나)"
+                ),
+            )
+
     # 5. Insert job
+    persisted_question = action.question + _encode_trade_spec(action)
     try:
         result = _supabase_request(
             "scheduled_jobs",
             method="POST",
             body={
                 "user_id": user_id,
-                "question": action.question,
+                "question": persisted_question,
                 "cron_expression": cron,
                 "model_selection_id": state.get_agent_state("model_selection_id"),
                 "enabled": action.enabled,
@@ -141,6 +242,15 @@ def _execute(action: RegisterJobAction, conversation: Any) -> RegisterJobObserva
             },
         )
         job_id = result[0]["id"] if isinstance(result, list) and result else None
+        if consumed_nonce_row and job_id:
+            try:
+                _supabase_request(
+                    f"trade_nonces?nonce=eq.{consumed_nonce_row['nonce']}",
+                    method="PATCH",
+                    body={"consumed_by_run": job_id},
+                )
+            except Exception:
+                pass
         return RegisterJobObservation(
             success=True,
             message=f"스케줄이 등록되었습니다. 다음 실행: {next_run_at[:16].replace('T', ' ')} UTC",
@@ -167,7 +277,7 @@ class RegisterJobTool(ToolDefinition):
             "properties": {
                 "question": {
                     "type": "string",
-                    "description": "The analysis question to run on schedule (e.g., '삼성전자 최근 실적 체크')",
+                    "description": "The analysis question to run on schedule (e.g., '삼성전자 최근 실적 체크'). For trade jobs, summarize the order in plain Korean — the structured spec goes in trade_specs.",
                 },
                 "cron_expression": {
                     "type": "string",
@@ -176,6 +286,40 @@ class RegisterJobTool(ToolDefinition):
                 "enabled": {
                     "type": "boolean",
                     "description": "Whether the job is active (default true)",
+                },
+                "trade_specs": {
+                    "type": "array",
+                    "description": "REQUIRED for any scheduled trade. Each item is a confirmed paper-trading order. Set ONLY after the user has explicitly confirmed every field via the slot dialog (symbol/side/qty/cron/price constraints/failure policy/expiration). Never invent values.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": {"type": "string", "description": "6-digit KR ticker"},
+                            "side": {"type": "string", "enum": ["buy", "sell"]},
+                            "qty": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["symbol", "side", "qty"],
+                    },
+                },
+                "on_failure": {
+                    "type": "string",
+                    "enum": ["skip", "retry_next_run"],
+                    "description": "Trade-job failure policy. 'skip' = log and continue; 'retry_next_run' = try again on next cron tick.",
+                },
+                "max_runs": {
+                    "type": "integer",
+                    "description": "Trade-job expiration. 1 = one-shot, omit = open-ended.",
+                },
+                "price_max": {
+                    "type": "integer",
+                    "description": "Buy-side price ceiling in KRW. If KIS quote exceeds this at execution time, the trade is skipped per on_failure.",
+                },
+                "price_min": {
+                    "type": "integer",
+                    "description": "Sell-side price floor in KRW.",
+                },
+                "nonce": {
+                    "type": "string",
+                    "description": "trade_specs 가 있는 경우 필수. prepare_trade(mode='scheduled') 로 발급받아 사용자 UI 승인을 거친 nonce.",
                 },
             },
             "required": ["question", "cron_expression"],

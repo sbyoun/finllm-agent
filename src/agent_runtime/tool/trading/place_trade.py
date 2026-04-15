@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from agent_runtime.kis.quote import kis_quote
 from agent_runtime.tool.schema import Action, Observation
 from agent_runtime.tool.tool import ToolDefinition
+from agent_runtime.tool.trading.prepare_trade import hash_spec as _hash_spec
 
 
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL", "").strip()
@@ -204,6 +205,7 @@ class PlaceTradeAction(Action):
     qty: int = 0
     portfolio_id: str = ""
     new_portfolio_name: str = ""
+    nonce: str | None = None
 
     def to_arguments_json(self) -> str:
         return json.dumps(
@@ -213,9 +215,39 @@ class PlaceTradeAction(Action):
                 "qty": self.qty,
                 "portfolio_id": self.portfolio_id or None,
                 "new_portfolio_name": self.new_portfolio_name or None,
+                "nonce": self.nonce,
             },
             ensure_ascii=False,
         )
+
+
+def consume_nonce(nonce: str, user_id: str, spec_hash: str) -> dict | None:
+    """Atomically transition an approved nonce -> consumed. Returns the row or None."""
+    if not nonce:
+        return None
+    # Use 'Z' suffix (url-safe) instead of raw '+00:00' which would be
+    # decoded as a literal space inside the URL query string.
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    # The body still uses RFC3339 with explicit offset — PostgREST parses it fine.
+    # PostgREST conditional PATCH: only rows matching all filters are updated.
+    path = (
+        f"trade_nonces?nonce=eq.{nonce}"
+        f"&user_id=eq.{user_id}"
+        f"&spec_hash=eq.{spec_hash}"
+        f"&status=eq.approved"
+        f"&expires_at=gt.{now_iso}"
+    )
+    try:
+        rows = _supabase_request(
+            path,
+            method="PATCH",
+            body={"status": "consumed", "consumed_at": now_iso},
+        )
+    except Exception:
+        return None
+    if isinstance(rows, list) and rows:
+        return rows[0]
+    return None
 
 
 @dataclass(slots=True)
@@ -270,23 +302,66 @@ def _execute(action: PlaceTradeAction, conversation: Any) -> PlaceTradeObservati
         return PlaceTradeObservation(success=False, message="symbol 이 필요합니다.")
     symbol = symbol.zfill(6) if symbol.isdigit() else symbol
 
-    gate = state.get_agent_state("trade_gate") if state else None
-    if gate and gate.get("allowed_symbols") is not None:
-        allowed = set(gate["allowed_symbols"])
-        if symbol not in allowed:
-            blocks = int(state.get_agent_state("trade_gate_blocks") or 0) + 1 if state else 1
-            block_msg = (
-                f"STOP. 종목 {symbol}은 사용자 지시·직전 분석 어느 쪽에도 없어 차단되었습니다. "
-                f"허용된 종목: {sorted(allowed)}. 다른 종목으로 재시도하지 말고, 즉시 사용자에게 "
-                f"'요청하신 종목은 직전 맥락에 없어 매수하지 않았습니다. 어떤 종목을 매수할지 알려주세요' "
-                f"라고 알린 뒤 종료하세요."
+    # Nonce gate: either system-trust (scheduled_job_id) or user-approved nonce.
+    snap = state.get_agent_state("state_snapshot") if state else None
+    scheduled_job_id = None
+    if isinstance(snap, dict):
+        scheduled_job_id = snap.get("scheduled_job_id")
+    # also accept direct agent_state key for scheduled runs
+    if not scheduled_job_id and state is not None:
+        scheduled_job_id = state.get_agent_state("scheduled_job_id")
+
+    try:
+        req_qty = int(action.qty)
+    except (TypeError, ValueError):
+        req_qty = 0
+
+    if scheduled_job_id:
+        # System trust: nonce was consumed at register_job time. Still verify
+        # this symbol/side/qty matches the stored trade_spec if available.
+        spec = state.get_agent_state("scheduled_trade_spec") if state else None
+        if spec:
+            orders = spec.get("orders") or []
+            match_order = next(
+                (
+                    o for o in orders
+                    if str(o.get("symbol", "")).zfill(6) == symbol
+                    and o.get("side") == (action.side or "").lower()
+                    and int(o.get("qty") or 0) == req_qty
+                ),
+                None,
             )
-            if state:
-                state.set_agent_state("trade_gate_blocks", blocks)
-                state.set_agent_state("trade_gate_last_block", block_msg)
-                state.set_agent_state("trade_gate_blocked_symbols",
-                    list(state.get_agent_state("trade_gate_blocked_symbols") or []) + [symbol])
-            return PlaceTradeObservation(success=False, message=block_msg)
+            if not match_order:
+                return PlaceTradeObservation(
+                    success=False,
+                    message=(
+                        f"STOP. 스케줄된 주문 명세와 일치하지 않습니다. "
+                        f"등록된 주문: {orders}. 요청: symbol={symbol}, side={side}, qty={req_qty}"
+                    ),
+                )
+    else:
+        # Interactive path: nonce is REQUIRED.
+        if not action.nonce:
+            return PlaceTradeObservation(
+                success=False,
+                message=(
+                    "STOP. 거래 승인 nonce 가 없습니다. prepare_trade 로 nonce 를 먼저 발급받고, "
+                    "사용자가 웹 모달 또는 텔레그램 버튼으로 승인한 다음 nonce 를 첨부해 다시 호출하세요. "
+                    "자연어 '예/네' 는 승인으로 간주되지 않습니다."
+                ),
+            )
+        spec_for_hash: dict[str, Any] = {"symbol": symbol, "side": side, "qty": req_qty}
+        spec_hash = _hash_spec(spec_for_hash)
+        consumed = consume_nonce(action.nonce, user_id, spec_hash)
+        if not consumed:
+            return PlaceTradeObservation(
+                success=False,
+                message=(
+                    "STOP. 유효하지 않거나 만료된 nonce 입니다. 가능한 원인: (1) 사용자가 아직 승인 버튼을 "
+                    "누르지 않음 (2) nonce 가 만료됨 (3) 주문 내용이 prepare_trade 당시와 달라짐 "
+                    "(symbol/side/qty 중 하나 drift). prepare_trade 로 새 nonce 를 발급받아 다시 시도하세요."
+                ),
+            )
 
     try:
         qty = int(action.qty)
@@ -497,6 +572,10 @@ class PlaceTradeTool(ToolDefinition):
                 "new_portfolio_name": {
                     "type": "string",
                     "description": "선택. 사용자가 '새 포트폴리오를 만들어' 와 같이 신규 포트폴리오 생성을 명시한 경우에만 이름을 넣는다. 같은 세션에서 여러 종목을 같은 새 포트폴리오에 담으려면 첫 호출에서 받은 portfolio_id 를 이후 호출에 portfolio_id 로 전달하라.",
+                },
+                "nonce": {
+                    "type": "string",
+                    "description": "prepare_trade 로 발급받은 nonce. 사용자가 UI 버튼으로 승인한 후에만 approved 상태가 되며, 이때만 place_trade 가 성공한다. scheduled 잡 자동 집행 경로에서는 생략 가능 (scheduled_job_id 기반 system trust).",
                 },
             },
             "required": ["symbol", "side", "qty"],
