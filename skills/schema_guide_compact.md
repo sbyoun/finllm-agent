@@ -3,6 +3,7 @@
 ## 규칙
 - stocks가 앵커. stock_id는 stocks.id에서. 없는 컬럼 상상 금지. proxy 대체 금지.
 - Oracle: `;` 금지, `LIMIT` 금지 → `FETCH FIRST`, `"date"` 쌍따옴표, `TO_DATE()`.
+- Oracle 집계: SELECT에 `MAX/MIN/SUM/COUNT`와 일반 컬럼을 섞으면 반드시 `GROUP BY`에 일반 컬럼 포함. 안 하면 `ORA-00937`. 집계 결과를 단일 값으로 쓰려면 서브쿼리/CTE로 분리할 것.
 - 넓은 표현: 실적→매출/영업이익/순이익, 밸류→PER/PBR/EV_EBITDA, 수급→순매수.
 - 같은 목표의 SQL은 **최대 3회** (에러·빈 결과 모두). 3회 후 결과 없으면 즉시 unavailable 안내, 우회 시도 금지. 성공한 SQL 반복 금지.
 
@@ -17,6 +18,8 @@ kr_investor_trade_daily: stock_id|"date"|foreign/personal/institution_net_value|
 kr_program_trade_daily: stock_id|"date"|program_net_value|close (*_value=백만원)
 kr_market_investor_daily: market_code|"date"|foreign/personal/institution_net_value (*_value=백만원)
 kr_market_program_daily: market_code|"date"|whole/arbitrage/nonarbitrage_net_value (*_value=백만원)
+**수급 날짜 규칙**: 수급 테이블(kr_investor/program/market_*)은 T+1 지연. SYSDATE/CURRENT_DATE/오늘·어제 날짜 하드코딩 금지. 반드시 `(SELECT MAX("date") FROM 해당테이블)` 서브쿼리로 최신 날짜 기준 조회.
+**벤치마크 날짜 규칙**: daily_prices와 benchmark_daily_prices의 거래일이 다를 수 있다. 초과수익 등 벤치마크 비교 시 기준 날짜(시작/종료)를 반드시 benchmark_daily_prices에서 추출하거나, 정확한 날짜가 없으면 `<=`/`>=`로 가장 가까운 날짜를 사용할 것. 두 테이블을 exact date JOIN하면 NULL 발생.
 stock_sectors: stock_id|sector|sector_group
 kr_loan_daily: stock_id|"date"|remaining_qty|remaining_amount(백만원)
 kr_short_sale_daily: stock_id|"date"|short_sale_qty/value|short_sale_volume_ratio (*_value=백만원)

@@ -14,6 +14,7 @@ DB 질문이면 이 문서를 기준으로 SQL을 작성한다.
 - 성공한 동일 SQL 반복 실행 금지.
 - `낮은/높은/상위/하위` → SQL의 `where` 또는 `order by`에 반영.
 - Oracle: `;` 금지, `LIMIT` 금지 → `FETCH FIRST N ROWS ONLY`, `"date"` 쌍따옴표 필수, 날짜는 `TO_DATE('YYYY-MM-DD','YYYY-MM-DD')`.
+- Oracle 집계 함수 규칙: SELECT에 `MAX/MIN/SUM/COUNT/AVG` 같은 집계 함수와 일반 컬럼을 함께 쓸 때 반드시 일반 컬럼을 `GROUP BY`에 포함해야 한다. 누락하면 `ORA-00937: not a single-group group function` 에러. 집계 결과를 단일 스칼라 값으로 쓰려면 서브쿼리나 CTE로 분리할 것. 예: `CROSS JOIN (SELECT MAX(close) as bm_close FROM benchmark_daily_prices WHERE ...) bm`.
 
 ## 데이터 커버리지
 
@@ -69,6 +70,10 @@ cols: stock_id | "date" | program_buy/sell/net_qty/value | program_net_qty/value
 ### kr_market_investor_daily
 cols: market_code | "date" | foreign_net_qty/value | personal_net_value | institution_net_value | close | price_change_pct
 *_value 단위: 백만원. 종목별 수급 → kr_investor_trade_daily.
+
+**⚠ 수급 날짜 규칙**: 수급 테이블(kr_investor_trade_daily, kr_program_trade_daily, kr_market_investor_daily, kr_market_program_daily)은 **T+1 지연**으로 당일 데이터가 없을 수 있다. 절대 SYSDATE/CURRENT_DATE/오늘·어제 날짜를 하드코딩하지 말 것. 반드시 `(SELECT MAX("date") FROM 해당테이블)` 서브쿼리로 최신 날짜를 동적으로 참조한다.
+
+**⚠ 벤치마크 날짜 규칙**: `daily_prices`와 `benchmark_daily_prices`는 거래일이 다를 수 있다(공휴일, 수집 시차 등). 초과수익·벤치마크 비교 쿼리에서 시작/종료 날짜를 `daily_prices`에서 뽑아 `benchmark_daily_prices`에 exact match하면 해당 날짜에 데이터가 없어 **NULL**이 된다. 반드시 기준 날짜를 `benchmark_daily_prices`에서 추출하거나, exact date가 없을 때 `(SELECT MAX("date") FROM benchmark_daily_prices WHERE symbol='KS11' AND "date" <= :target_date)` 패턴으로 가장 가까운 날짜를 사용할 것.
 
 ### kr_market_program_daily
 cols: market_code | "date" | whole/arbitrage/nonarbitrage_net_value/qty

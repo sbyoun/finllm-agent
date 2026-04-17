@@ -419,9 +419,57 @@ def scenario_8():
 
 
 # ============================================================
+def scenario_9():
+    """Benchmark excess return — 코스피 대비 초과수익 (벤치마크 날짜 NULL 방지)"""
+    print(f"\n{'='*70}\n  S9: Benchmark excess return\n{'='*70}")
+    S, sid = "9", "test-s9"
+
+    q = "코스피 대비 최근 6개월 초과수익이 높은 종목 상위 10개 알려줘"
+    r = run_turn(q, [], sid)
+    print_turn(S, 1, q, r)
+
+    datasets = r.get("datasets", [])
+    msg = r.get("decision", {}).get("assistantMessage", "")
+
+    ok = True
+    ok &= check(S, "has dataset", len(datasets) > 0)
+    ok &= check(S, "non-empty answer", bool(msg.strip()))
+
+    if datasets:
+        ds = datasets[0]
+        rows = ds.get("rows", [])
+        cols = [c.get("key", "") for c in ds.get("columns", [])]
+
+        ok &= check(S, "has rows", len(rows) >= 5, f"rows={len(rows)}")
+
+        # Find benchmark/excess return columns (flexible naming)
+        benchmark_cols = [c for c in cols if "kospi" in c.lower() or "benchmark" in c.lower() or "index_return" in c.lower()]
+        excess_cols = [c for c in cols if "excess" in c.lower() or "초과" in c.lower()]
+
+        ok &= check(S, "has benchmark column", len(benchmark_cols) > 0, f"found={benchmark_cols}")
+        ok &= check(S, "has excess return column", len(excess_cols) > 0, f"found={excess_cols}")
+
+        # Key check: benchmark and excess return values must NOT be NULL
+        if benchmark_cols and rows:
+            bcol = benchmark_cols[0]
+            null_count = sum(1 for row in rows if row.get(bcol) is None or row.get(bcol) == "")
+            ok &= check(S, "benchmark values not NULL", null_count == 0, f"null={null_count}/{len(rows)}")
+
+        if excess_cols and rows:
+            ecol = excess_cols[0]
+            null_count = sum(1 for row in rows if row.get(ecol) is None or row.get(ecol) == "")
+            ok &= check(S, "excess return values not NULL", null_count == 0, f"null={null_count}/{len(rows)}")
+
+        check_dataset_values(S, ds)
+
+    return ok
+
+
+# ============================================================
 if __name__ == "__main__":
     scenarios = {"1": scenario_1, "2": scenario_2, "3": scenario_3, "4": scenario_4,
-                 "5": scenario_5, "6": scenario_6, "7": scenario_7, "8": scenario_8}
+                 "5": scenario_5, "6": scenario_6, "7": scenario_7, "8": scenario_8,
+                 "9": scenario_9}
     targets = sys.argv[1:] if len(sys.argv) > 1 else sorted(scenarios.keys())
     results = {}
 
