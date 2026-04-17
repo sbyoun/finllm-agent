@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RUNTIME_SERVICE_NAME="${RUNTIME_SERVICE_NAME:-financial-agent-runtime-py}"
-RUNTIME_PORT="${RUNTIME_PORT:-8010}"
+RUNTIME_SERVICE_NAME="${RUNTIME_SERVICE_NAME:-financial-agent-runtime-py-staging}"
+RUNTIME_PORT="${RUNTIME_PORT:-8001}"
 
 systemctl --user restart "$RUNTIME_SERVICE_NAME"
 systemctl --user status "$RUNTIME_SERVICE_NAME" --no-pager --lines=20 || true
