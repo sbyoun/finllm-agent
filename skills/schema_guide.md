@@ -10,9 +10,11 @@ DB 질문이면 이 문서를 기준으로 SQL을 작성한다.
 - proxy metric 대체 금지: `market_cap ≠ close*volume`, `market share ≠ 매출순위`.
 - 넓은 표현은 다의적으로 본다: 실적→매출/영업이익/순이익, 밸류→PER/PBR/EV_EBITDA, 수급→순매수.
 - 구현 불가능한 조건은 조용히 약화하지 말고 explicitly unavailable.
-- SQL 에러 → 같은 목표로 SQL 수정 재시도. 성공한 동일 SQL 반복 실행 금지.
+- 같은 목표의 SQL은 **최대 3회**까지만 시도 (에러·빈 결과 모두 포함). 3회 후에도 결과 없으면 "현재 데이터로는 해당 조건을 조회할 수 없다"고 즉시 안내하고 멈춘다. 다른 account_id·다른 JOIN으로 우회 시도하지 않는다.
+- 성공한 동일 SQL 반복 실행 금지.
 - `낮은/높은/상위/하위` → SQL의 `where` 또는 `order by`에 반영.
 - Oracle: `;` 금지, `LIMIT` 금지 → `FETCH FIRST N ROWS ONLY`, `"date"` 쌍따옴표 필수, 날짜는 `TO_DATE('YYYY-MM-DD','YYYY-MM-DD')`.
+- Oracle 집계 함수 규칙: SELECT에 `MAX/MIN/SUM/COUNT/AVG` 같은 집계 함수와 일반 컬럼을 함께 쓸 때 반드시 일반 컬럼을 `GROUP BY`에 포함해야 한다. 누락하면 `ORA-00937: not a single-group group function` 에러. 집계 결과를 단일 스칼라 값으로 쓰려면 서브쿼리나 CTE로 분리할 것. 예: `CROSS JOIN (SELECT MAX(close) as bm_close FROM benchmark_daily_prices WHERE ...) bm`.
 
 ## 데이터 커버리지
 
@@ -68,6 +70,10 @@ cols: stock_id | "date" | program_buy/sell/net_qty/value | program_net_qty/value
 ### kr_market_investor_daily
 cols: market_code | "date" | foreign_net_qty/value | personal_net_value | institution_net_value | close | price_change_pct
 *_value 단위: 백만원. 종목별 수급 → kr_investor_trade_daily.
+
+**⚠ 수급 날짜 규칙**: 수급 테이블(kr_investor_trade_daily, kr_program_trade_daily, kr_market_investor_daily, kr_market_program_daily)은 **T+1 지연**으로 당일 데이터가 없을 수 있다. 절대 SYSDATE/CURRENT_DATE/오늘·어제 날짜를 하드코딩하지 말 것. 반드시 `(SELECT MAX("date") FROM 해당테이블)` 서브쿼리로 최신 날짜를 동적으로 참조한다.
+
+**⚠ 벤치마크 날짜 규칙**: `daily_prices`와 `benchmark_daily_prices`는 거래일이 다를 수 있다(공휴일, 수집 시차 등). 초과수익·벤치마크 비교 쿼리에서 시작/종료 날짜를 `daily_prices`에서 뽑아 `benchmark_daily_prices`에 exact match하면 해당 날짜에 데이터가 없어 **NULL**이 된다. 반드시 기준 날짜를 `benchmark_daily_prices`에서 추출하거나, exact date가 없을 때 `(SELECT MAX("date") FROM benchmark_daily_prices WHERE symbol='KS11' AND "date" <= :target_date)` 패턴으로 가장 가까운 날짜를 사용할 것.
 
 ### kr_market_program_daily
 cols: market_code | "date" | whole/arbitrage/nonarbitrage_net_value/qty
@@ -131,10 +137,14 @@ IT서비스, 가구, 가스유틸리티, 가정용기기와용품, 가정용품,
   GROUP BY fs.year
   ORDER BY fs.year;
   ```
+- "ROIC" / "투하자본이익률" → 직접 계정 없음. **역산 공식**: `ROIC = 영업이익(6597) / (총자산(6606) - 유동부채(6607)) × 100` (ROCE와 동일 공식).
+- "ROIIC" / "투하자본증분수익률" → 직접 계정 없음. **역산 공식**: `ROIIC = (당기 영업이익(6597) - 전기 영업이익) / (당기 투하자본 - 전기 투하자본) × 100`. 투하자본 = 총자산(6606) - 유동부채(6607).
 - "부채비율" → **6584**. 단 kis_kr 정의(=총부채/자기자본×100)라 ratio 자체 사용. LIKE 검색 금지.
 - "순현금" / "net cash" 직접 계정 없음 → `유동자산(6604) > 총부채(6609)` 조건으로 판정하거나, `자기자본(6613) - 비유동자산(6605)` 근사.
 - "현금성자산" 직접 계정 없음 → kis_kr 한계. 유동자산(6604)으로 근사.
-- "배당수익률" / "DPS" / "주당배당금" → **kis_kr 미제공**. 제공 가능한 것: 배당성향(6588)뿐. 요청 시 "배당 이력/DPS 데이터는 현재 미제공" 고지.
+- "배당수익률" / "DPS" / "주당배당금":
+  - **한국(KR)**: kis_kr 미제공, 역산/조합으로도 구할 수 없음. 배당성향(6588)은 있으나 이를 순이익·시가총액과 조합해 배당수익률을 역산하는 것도 금지 (정확도 보장 불가). 요청 시 SQL 시도 없이 즉시 "한국 종목은 배당수익률/DPS 데이터 미제공" 고지.
+  - **미국(US)**: `Dividend Per Share`(account_id=156, 22K건), `Dividend Growth`(157), `Dividends Per Share`(11853) 제공. 배당수익률 = DPS / close × 100 으로 계산 가능.
 - "ETF" (한국) → `stocks WHERE country='KR' AND instrument_type='etf'` (1088종목). daily_prices 조인 가능. 주식과 혼동 방지 위해 모든 한국 스크리닝에 `instrument_type` 필터 명시 권장.
 - "ETF" (미국) → `us_stock_snapshots WHERE instrument_type='etf'` (5505종목, 메타만). 가격은 stocks 싱크 전이라 SP1500 외는 daily_prices 미제공 → 종목 리스트/메타까지만 답변.
 - "나스닥" / "NASDAQ" / "거래소" → `us_stock_snapshots.exchange IN ('NAS','NYS','AMS')`가 유일한 US 거래소 소스. 나스닥 주식: `exchange='NAS' AND instrument_type='stock'` (~3,875). stocks와 조인: `stocks.ticker = us_stock_snapshots.symbol`. 한국은 `stocks.market`(KOSPI/KOSDAQ) 직접 사용.
@@ -151,7 +161,9 @@ reliability: trusted raw flow=6592,6597,6603,6594,6590 | trusted raw point=6580,
 
 ## 파생 지표
 
-PBR = close / bps(6582) | PER = close / eps(6580) | OpMargin = bsop_prti(6597) / sale_account(6592) | Revenue_YoY = 6592 전년동기비 | OpIncome_YoY = 6597 전년동기비 | NetIncome_YoY = 6603 전년동기비 | 5Y_OpIncome_CAGR = (latest/5yr_ago)^(1/5)-1
+**KR**: PBR = close / bps(6582) | PER = close / eps(6580) | OpMargin = bsop_prti(6597) / sale_account(6592) | Revenue_YoY = 6592 전년동기비 | OpIncome_YoY = 6597 전년동기비 | NetIncome_YoY = 6603 전년동기비 | 5Y_OpIncome_CAGR = (latest/5yr_ago)^(1/5)-1
+
+**US**: PBR = close / Book Value Per Share(209) | PER = close / EPS Basic(151) | 배당수익률 = DPS(156) / close × 100 | OpMargin = 159 직접 제공 | Revenue Growth = 132 직접 제공
 
 ## Canonical SQL 패턴
 
