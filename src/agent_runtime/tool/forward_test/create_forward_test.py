@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -32,25 +32,87 @@ def _supabase_request(path: str, *, method: str = "GET", body: dict | None = Non
         return json.loads(resp.read())
 
 
+def _parse_cron_number_field(field: str, minimum: int, maximum: int) -> list[int] | None:
+    if field == "*":
+        return list(range(minimum, maximum + 1))
+
+    values: set[int] = set()
+    for raw_part in field.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            try:
+                start = int(start_text)
+                end = int(end_text)
+            except ValueError:
+                return None
+            if start > end:
+                return None
+            for value in range(start, end + 1):
+                if value < minimum or value > maximum:
+                    return None
+                values.add(value)
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            return None
+        if value < minimum or value > maximum:
+            return None
+        values.add(value)
+
+    return sorted(values)
+
+
+def _parse_cron_weekday_field(field: str) -> list[int] | None:
+    values = _parse_cron_number_field(field, 0, 7)
+    if values is None:
+        return None
+    return sorted({value % 7 for value in values})
+
+
+def _parse_next_run_without_croniter(cron_expression: str, now: datetime) -> datetime:
+    parts = cron_expression.strip().split()
+    if len(parts) != 5:
+        return now + timedelta(hours=1)
+
+    minute_field, hour_field, day_field, _, weekday_field = parts
+    if day_field != "*":
+        return now + timedelta(hours=1)
+
+    minutes = _parse_cron_number_field(minute_field, 0, 59)
+    hours = _parse_cron_number_field(hour_field, 0, 23)
+    weekdays = _parse_cron_weekday_field(weekday_field)
+    if not minutes or not hours or weekdays == []:
+        return now + timedelta(hours=1)
+
+    for day_offset in range(8):
+        for hour in hours:
+            for minute in minutes:
+                candidate = now + timedelta(days=day_offset)
+                candidate = candidate.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if candidate <= now:
+                    continue
+                cron_weekday = candidate.isoweekday() % 7
+                if weekdays is not None and cron_weekday not in weekdays:
+                    continue
+                return candidate
+
+    return now + timedelta(hours=1)
+
+
 def _parse_next_run(cron_expression: str) -> str:
+    now = datetime.now(timezone.utc)
     try:
         from croniter import croniter  # type: ignore[import-untyped]
-        cron = croniter(cron_expression, datetime.now(timezone.utc))
+        cron = croniter(cron_expression, now)
         return cron.get_next(datetime).isoformat()
     except ImportError:
         pass
-    parts = cron_expression.strip().split()
-    if len(parts) == 5:
-        minute, hour = parts[0], parts[1]
-        if minute.isdigit() and hour.isdigit():
-            now = datetime.now(timezone.utc)
-            target = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-            if target <= now:
-                from datetime import timedelta
-                target += timedelta(days=1)
-            return target.isoformat()
-    from datetime import timedelta
-    return (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+    return _parse_next_run_without_croniter(cron_expression, now).isoformat()
 
 
 @dataclass(slots=True)
