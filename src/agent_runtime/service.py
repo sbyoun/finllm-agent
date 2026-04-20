@@ -550,23 +550,33 @@ def _build_result(
                 preferredColumns=["period", "return_pct", "benchmark_pct", "excess_pct", "holdings"],
             ),
         )
-    elif last_sql_action and last_sql_observation and last_sql_observation.row_count > 0:
-        datasets = [_build_dataset_from_sql(action, observation) for action, observation in final_sql_results if observation.row_count > 0]
-        sql_scripts = [action.sql for action, _ in final_sql_results]
-        dataset = _build_dataset_from_sql(last_sql_action, last_sql_observation)
-        sql = last_sql_action.sql
-        mode = "tool-result"
-        final_message = _strip_markdown_tables(final_message)
-        tool_request = RuntimeToolRequest(
-            kind="sql",
-            sql=last_sql_action.sql,
-            reason="Agent completed after tool loop",
-            display=RuntimeDisplaySpec(
-                type="table",
-                title=dataset.title,
-                preferredColumns=[column.key for column in dataset.columns[:8]],
-            ),
-        )
+    else:
+        successful_sql_results = [
+            (action, observation)
+            for action, observation in final_sql_results
+            if observation.row_count > 0
+        ]
+        if successful_sql_results:
+            datasets = [
+                _build_dataset_from_sql(action, observation)
+                for action, observation in successful_sql_results
+            ]
+            sql_scripts = [action.sql for action, _ in successful_sql_results]
+            last_successful_sql_action, last_successful_sql_observation = successful_sql_results[-1]
+            dataset = _build_dataset_from_sql(last_successful_sql_action, last_successful_sql_observation)
+            sql = last_successful_sql_action.sql
+            mode = "tool-result"
+            final_message = _strip_markdown_tables(final_message)
+            tool_request = RuntimeToolRequest(
+                kind="sql",
+                sql=last_successful_sql_action.sql,
+                reason="Agent completed after tool loop",
+                display=RuntimeDisplaySpec(
+                    type="table",
+                    title=dataset.title,
+                    preferredColumns=[column.key for column in dataset.columns[:8]],
+                ),
+            )
 
     if conversation.state.execution_status == ConversationExecutionStatus.ERROR and not final_message:
         mode = "clarification"
