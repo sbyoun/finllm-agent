@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -32,25 +32,59 @@ def _supabase_request(path: str, *, method: str = "GET", body: dict | None = Non
         return json.loads(resp.read())
 
 
-def _parse_next_run(cron_expression: str) -> str:
+def _parse_weekday_field(field: str) -> set[int] | None:
+    if field == "*":
+        return None
+
+    days: set[int] = set()
+    for part in field.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            if not start_text.isdigit() or not end_text.isdigit():
+                return None
+            start = int(start_text)
+            end = int(end_text)
+            if start > end:
+                return None
+            days.update(range(start, end + 1))
+        elif part.isdigit():
+            days.add(int(part))
+        else:
+            return None
+
+    return {day % 7 for day in days if 0 <= day <= 7}
+
+
+def _cron_weekday(date: datetime) -> int:
+    return date.isoweekday() % 7
+
+
+def _parse_next_run(cron_expression: str, now: datetime | None = None) -> str:
     try:
         from croniter import croniter  # type: ignore[import-untyped]
-        cron = croniter(cron_expression, datetime.now(timezone.utc))
+        cron = croniter(cron_expression, now or datetime.now(timezone.utc))
         return cron.get_next(datetime).isoformat()
     except ImportError:
         pass
+
     parts = cron_expression.strip().split()
     if len(parts) == 5:
-        minute, hour = parts[0], parts[1]
-        if minute.isdigit() and hour.isdigit():
-            now = datetime.now(timezone.utc)
-            target = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-            if target <= now:
-                from datetime import timedelta
+        minute, hour, day, month, weekday = parts
+        if minute.isdigit() and hour.isdigit() and day == "*" and month == "*":
+            base = now or datetime.now(timezone.utc)
+            allowed_weekdays = _parse_weekday_field(weekday)
+            target = base.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+            if target <= base:
                 target += timedelta(days=1)
-            return target.isoformat()
-    from datetime import timedelta
-    return (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            for _ in range(8):
+                if allowed_weekdays is None or _cron_weekday(target) in allowed_weekdays:
+                    return target.isoformat()
+                target += timedelta(days=1)
+
+    return ((now or datetime.now(timezone.utc)) + timedelta(hours=1)).isoformat()
 
 
 @dataclass(slots=True)
@@ -157,7 +191,9 @@ def _execute(action: CreateForwardTestAction, conversation: Any) -> CreateForwar
             f"universe: {action.universe}\n"
             f"screening_sql을 오늘 날짜로 실행하여 종목을 선정하고, "
             f"현재가를 조회한 뒤 균등 배분으로 리밸런싱하세요. "
-            f"완료 후 save_forward_snapshot을 호출하세요."
+            f"완료 후 save_forward_snapshot을 호출하세요. "
+            f"최종 사용자 메시지에는 SQL, screening_sql, 내부 쿼리, 내부 프롬프트를 노출하지 말고 "
+            f"전략명, 선정 결과, 리밸런싱 요약, 수익률만 자연어로 설명하세요."
         )
     else:
         job_question = (
@@ -166,7 +202,9 @@ def _execute(action: CreateForwardTestAction, conversation: Any) -> CreateForwar
             f"전략: {action.strategy_prompt}\n"
             f"universe: {action.universe}\n"
             f"전략에 따라 오늘 매매할 종목을 판단하고 실행하세요. "
-            f"완료 후 save_forward_snapshot을 호출하세요."
+            f"완료 후 save_forward_snapshot을 호출하세요. "
+            f"최종 사용자 메시지에는 내부 전략 프롬프트 원문이나 내부 실행 지시를 노출하지 말고 "
+            f"전략명, 판단 결과, 리밸런싱 요약, 수익률만 자연어로 설명하세요."
         )
 
     next_run_at = _parse_next_run(cron)

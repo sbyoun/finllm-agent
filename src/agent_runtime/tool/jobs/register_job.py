@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -33,32 +33,64 @@ def _supabase_request(path: str, *, method: str = "GET", body: dict | None = Non
         return json.loads(resp.read())
 
 
-def _parse_next_run(cron_expression: str) -> str:
+def _parse_weekday_field(field: str) -> set[int] | None:
+    if field == "*":
+        return None
+
+    days: set[int] = set()
+    for part in field.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            if not start_text.isdigit() or not end_text.isdigit():
+                return None
+            start = int(start_text)
+            end = int(end_text)
+            if start > end:
+                return None
+            days.update(range(start, end + 1))
+        elif part.isdigit():
+            days.add(int(part))
+        else:
+            return None
+
+    return {day % 7 for day in days if 0 <= day <= 7}
+
+
+def _cron_weekday(date: datetime) -> int:
+    return date.isoweekday() % 7
+
+
+def _parse_next_run(cron_expression: str, now: datetime | None = None) -> str:
     """Compute next run time from a cron expression. Simple implementation."""
     try:
         # Try using croniter if available
         from croniter import croniter  # type: ignore[import-untyped]
-        cron = croniter(cron_expression, datetime.now(timezone.utc))
+        cron = croniter(cron_expression, now or datetime.now(timezone.utc))
         return cron.get_next(datetime).isoformat()
     except ImportError:
         pass
 
     # Fallback: parse simple patterns
-    # "0 9 * * *" -> next 9:00 UTC
+    # "0 9 * * 1-5" -> next weekday 9:00 UTC
     parts = cron_expression.strip().split()
     if len(parts) == 5:
-        minute, hour = parts[0], parts[1]
-        if minute.isdigit() and hour.isdigit():
-            now = datetime.now(timezone.utc)
-            target = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-            if target <= now:
-                from datetime import timedelta
+        minute, hour, day, month, weekday = parts
+        if minute.isdigit() and hour.isdigit() and day == "*" and month == "*":
+            base = now or datetime.now(timezone.utc)
+            allowed_weekdays = _parse_weekday_field(weekday)
+            target = base.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+            if target <= base:
                 target += timedelta(days=1)
-            return target.isoformat()
+            for _ in range(8):
+                if allowed_weekdays is None or _cron_weekday(target) in allowed_weekdays:
+                    return target.isoformat()
+                target += timedelta(days=1)
 
     # Default: 1 hour from now
-    from datetime import timedelta
-    return (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    return ((now or datetime.now(timezone.utc)) + timedelta(hours=1)).isoformat()
 
 
 @dataclass(slots=True)
