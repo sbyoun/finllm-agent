@@ -7,7 +7,6 @@ import os
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from agent_runtime.tool.schema import Action, Observation
@@ -63,6 +62,63 @@ def _compute_return_pct(total_value: float, initial_capital: Any, fallback: Any 
     return round(((total_value / initial) - 1) * 100, 6)
 
 
+def _trade_side(trade: dict) -> str:
+    raw = str(trade.get("side") or trade.get("action") or "").strip().lower()
+    if raw in {"매수", "buy", "b"}:
+        return "buy"
+    if raw in {"매도", "sell", "s"}:
+        return "sell"
+    return raw
+
+
+def _trade_amount(trade: dict) -> float:
+    amount = _as_float(trade.get("amount"), default=-1)
+    if amount >= 0:
+        return amount
+    qty = _first_number(trade, ("qty", "shares", "quantity", "units"))
+    price = _first_number(trade, ("price", "current_price", "execution_price"))
+    return qty * price
+
+
+def _compute_cash_after_trades(starting_cash: Any, trades: list[dict], fallback_cash: Any) -> float:
+    cash = _as_float(starting_cash, default=-1)
+    if cash < 0:
+        return _as_float(fallback_cash)
+
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        amount = _trade_amount(trade)
+        side = _trade_side(trade)
+        if side == "buy":
+            cash -= amount
+        elif side == "sell":
+            cash += amount
+    return cash
+
+
+def _apply_trade_prices_to_holdings(holdings: list[dict], trades: list[dict] | None) -> list[dict]:
+    latest_trade_price: dict[str, float] = {}
+    for trade in trades or []:
+        if not isinstance(trade, dict):
+            continue
+        symbol = str(trade.get("symbol", "")).strip()
+        price = _first_number(trade, ("price", "current_price", "execution_price"))
+        if symbol and price > 0:
+            latest_trade_price[symbol] = price
+
+    updated: list[dict] = []
+    for holding in holdings:
+        if not isinstance(holding, dict):
+            continue
+        item = dict(holding)
+        symbol = str(item.get("symbol", "")).strip()
+        if symbol in latest_trade_price:
+            item["current_price"] = latest_trade_price[symbol]
+        updated.append(item)
+    return updated
+
+
 def _supabase_request(path: str, *, method: str = "GET", body: dict | None = None) -> Any:
     url = f"{SUPABASE_URL}/rest/v1/{path}"
     headers = {
@@ -86,44 +142,21 @@ def _fetch_initial_capital(forward_test_id: str) -> float:
     return 0
 
 
-def _fetch_latest_close(symbol: str) -> float:
-    ticker = quote(symbol.strip(), safe="")
-    stocks = _supabase_request(f"stocks?ticker=eq.{ticker}&select=id,ticker&limit=1")
-    if not isinstance(stocks, list) or not stocks:
-        return 0
-
-    stock_id = quote(str(stocks[0].get("id", "")).strip(), safe="")
-    if not stock_id:
-        return 0
-
-    prices = _supabase_request(
-        f"daily_prices?stock_id=eq.{stock_id}&select=close,date&order=date.desc&limit=1"
+def _fetch_latest_snapshot_cash(forward_test_id: str) -> float:
+    result = _supabase_request(
+        f"forward_snapshots?forward_test_id=eq.{forward_test_id}"
+        "&select=cash&order=snapshot_at.desc&limit=1"
     )
-    if isinstance(prices, list) and prices:
-        return _as_float(prices[0].get("close"))
-    return 0
+    if isinstance(result, list) and result:
+        return _as_float(result[0].get("cash"), default=-1)
+    return -1
 
 
-def _refresh_holding_prices(holdings: list[dict]) -> list[dict]:
-    refreshed: list[dict] = []
-    latest_by_symbol: dict[str, float] = {}
-
-    for holding in holdings:
-        if not isinstance(holding, dict):
-            continue
-        item = dict(holding)
-        symbol = str(item.get("symbol", "")).strip()
-        if symbol:
-            if symbol not in latest_by_symbol:
-                try:
-                    latest_by_symbol[symbol] = _fetch_latest_close(symbol)
-                except Exception:
-                    latest_by_symbol[symbol] = 0
-            if latest_by_symbol[symbol] > 0:
-                item["current_price"] = latest_by_symbol[symbol]
-        refreshed.append(item)
-
-    return refreshed
+def _starting_cash(forward_test_id: str, initial_capital: float) -> float:
+    previous_cash = _fetch_latest_snapshot_cash(forward_test_id)
+    if previous_cash >= 0:
+        return previous_cash
+    return initial_capital
 
 
 @dataclass(slots=True)
@@ -178,20 +211,28 @@ def _execute(action: SaveForwardSnapshotAction, conversation: Any) -> SaveForwar
         )
 
     try:
-        holdings = _refresh_holding_prices(action.holdings)
-        total_value = _compute_total_value(holdings, action.cash)
+        initial_capital = _fetch_initial_capital(action.forward_test_id)
+        holdings = _apply_trade_prices_to_holdings(action.holdings, action.trades)
+        cash = action.cash
+        if action.trades:
+            cash = _compute_cash_after_trades(
+                _starting_cash(action.forward_test_id, initial_capital),
+                action.trades,
+                fallback_cash=action.cash,
+            )
+        total_value = _compute_total_value(holdings, cash)
         if total_value <= 0 and action.total_value:
             total_value = _as_float(action.total_value)
         return_pct = _compute_return_pct(
             total_value,
-            _fetch_initial_capital(action.forward_test_id),
+            initial_capital,
             fallback=action.return_pct,
         )
 
         body: dict[str, Any] = {
             "forward_test_id": action.forward_test_id,
             "holdings": holdings,
-            "cash": action.cash,
+            "cash": cash,
             "total_value": total_value,
             "return_pct": return_pct,
         }
@@ -238,7 +279,7 @@ class SaveForwardSnapshotTool(ToolDefinition):
                 },
                 "holdings": {
                     "type": "array",
-                    "description": "현재 보유 종목 목록. 각 항목: {symbol, name, qty, avg_cost, current_price, weight_pct}. current_price는 실제 최신 평가가이며 avg_cost를 임의로 복사하지 않습니다.",
+                    "description": "현재 보유 종목 목록. 각 항목: {symbol, name, qty, avg_cost, current_price, weight_pct}. 리밸런싱에서 매매한 종목은 체결가를 current_price로 사용합니다.",
                     "items": {"type": "object"},
                 },
                 "cash": {
@@ -255,7 +296,7 @@ class SaveForwardSnapshotTool(ToolDefinition):
                 },
                 "trades": {
                     "type": "array",
-                    "description": "이번 리밸런싱 매매 내역. 각 항목: {symbol, name, side, qty, price, reason}",
+                    "description": "이번 리밸런싱 매매 내역. 각 항목: {symbol, name, side, qty, price, reason}. price는 매매 시점 체결/현재가입니다.",
                     "items": {"type": "object"},
                 },
                 "reasoning": {
