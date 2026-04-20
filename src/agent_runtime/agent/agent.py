@@ -270,7 +270,12 @@ class Agent(AgentBase):
             summary=observation_summary,
         )
 
-        if tool_name == "run_sql" and isinstance(action, RunSQLAction) and isinstance(observation, RunSQLObservation):
+        if (
+            tool_name == "run_sql"
+            and isinstance(action, RunSQLAction)
+            and isinstance(observation, RunSQLObservation)
+            and observation.row_count > 0
+        ):
             state.set_agent_state(
                 "last_successful_sql",
                 {
