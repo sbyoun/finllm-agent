@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import patch
 
 from agent_runtime.tool.forward_test.save_forward_snapshot import (
     _apply_trade_prices_to_holdings,
     _compute_cash_after_trades,
     _compute_return_pct,
     _compute_total_value,
+    _refresh_trade_prices,
 )
 
 
@@ -50,6 +52,28 @@ class SaveForwardSnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual(cash, 9000)
+
+    def test_refresh_trade_prices_uses_kis_quote_for_kr_ticker(self) -> None:
+        with patch(
+            "agent_runtime.tool.forward_test.save_forward_snapshot._fetch_domestic_current_price",
+            return_value=72000,
+        ):
+            trades = _refresh_trade_prices(
+                [{"symbol": "005930", "side": "sell", "qty": 2, "price": 70000}]
+            )
+
+        self.assertEqual(trades[0]["price"], 72000)
+
+    def test_refresh_trade_prices_falls_back_to_input_price_on_quote_failure(self) -> None:
+        with patch(
+            "agent_runtime.tool.forward_test.save_forward_snapshot._fetch_domestic_current_price",
+            side_effect=RuntimeError("quote failed"),
+        ):
+            trades = _refresh_trade_prices(
+                [{"symbol": "005930", "side": "sell", "qty": 2, "price": 70000}]
+            )
+
+        self.assertEqual(trades[0]["price"], 70000)
 
 
 if __name__ == "__main__":

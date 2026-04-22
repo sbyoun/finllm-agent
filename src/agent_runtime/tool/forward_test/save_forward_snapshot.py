@@ -15,6 +15,7 @@ from agent_runtime.tool.tool import ToolDefinition
 
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+_KIS_CLIENT: Any | None = None
 
 
 def _as_float(value: Any, default: float = 0) -> float:
@@ -119,6 +120,50 @@ def _apply_trade_prices_to_holdings(holdings: list[dict], trades: list[dict] | N
     return updated
 
 
+def _get_kis_client() -> Any:
+    global _KIS_CLIENT
+    if _KIS_CLIENT is None:
+        from alpha_engine.kis.simpleki import SimpleKI
+        from alpha_engine.settings import settings
+
+        _KIS_CLIENT = SimpleKI(settings.KIS_KEYFILE_PATH)
+    return _KIS_CLIENT
+
+
+def _is_kr_ticker(symbol: str) -> bool:
+    return symbol.isdigit() and len(symbol) <= 6
+
+
+def _fetch_domestic_current_price(symbol: str) -> float:
+    if not _is_kr_ticker(symbol):
+        return 0
+    output = _get_kis_client().get_current_price_domestic(symbol.zfill(6))
+    return _as_float((output or {}).get("stck_prpr"))
+
+
+def _refresh_trade_prices(trades: list[dict] | None) -> list[dict] | None:
+    if not trades:
+        return trades
+
+    latest_by_symbol: dict[str, float] = {}
+    refreshed: list[dict] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        item = dict(trade)
+        symbol = str(item.get("symbol", "")).strip()
+        if symbol:
+            if symbol not in latest_by_symbol:
+                try:
+                    latest_by_symbol[symbol] = _fetch_domestic_current_price(symbol)
+                except Exception:
+                    latest_by_symbol[symbol] = 0
+            if latest_by_symbol[symbol] > 0:
+                item["price"] = latest_by_symbol[symbol]
+        refreshed.append(item)
+    return refreshed
+
+
 def _supabase_request(path: str, *, method: str = "GET", body: dict | None = None) -> Any:
     url = f"{SUPABASE_URL}/rest/v1/{path}"
     headers = {
@@ -212,12 +257,13 @@ def _execute(action: SaveForwardSnapshotAction, conversation: Any) -> SaveForwar
 
     try:
         initial_capital = _fetch_initial_capital(action.forward_test_id)
-        holdings = _apply_trade_prices_to_holdings(action.holdings, action.trades)
+        trades = _refresh_trade_prices(action.trades)
+        holdings = _apply_trade_prices_to_holdings(action.holdings, trades)
         cash = action.cash
-        if action.trades:
+        if trades:
             cash = _compute_cash_after_trades(
                 _starting_cash(action.forward_test_id, initial_capital),
-                action.trades,
+                trades,
                 fallback_cash=action.cash,
             )
         total_value = _compute_total_value(holdings, cash)
@@ -236,8 +282,8 @@ def _execute(action: SaveForwardSnapshotAction, conversation: Any) -> SaveForwar
             "total_value": total_value,
             "return_pct": return_pct,
         }
-        if action.trades:
-            body["trades"] = action.trades
+        if trades:
+            body["trades"] = trades
         if action.reasoning:
             body["reasoning"] = action.reasoning
 
@@ -246,7 +292,7 @@ def _execute(action: SaveForwardSnapshotAction, conversation: Any) -> SaveForwar
 
         # Build summary
         n_holdings = len(action.holdings)
-        n_trades = len(action.trades) if action.trades else 0
+        n_trades = len(trades) if trades else 0
         summary = (
             f"보유 {n_holdings}종목 | 매매 {n_trades}건 | "
             f"평가액 {total_value:,.0f} | 수익률 {return_pct:+.2f}%"
@@ -296,7 +342,7 @@ class SaveForwardSnapshotTool(ToolDefinition):
                 },
                 "trades": {
                     "type": "array",
-                    "description": "이번 리밸런싱 매매 내역. 각 항목: {symbol, name, side, qty, price, reason}. price는 매매 시점 체결/현재가입니다.",
+                    "description": "이번 리밸런싱 매매 내역. 각 항목: {symbol, name, side, qty, price, reason}. 국내 6자리 티커는 서버가 KIS 현재가로 price를 보정합니다.",
                     "items": {"type": "object"},
                 },
                 "reasoning": {
