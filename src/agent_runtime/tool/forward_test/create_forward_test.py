@@ -103,16 +103,27 @@ def _parse_next_run_without_croniter(cron_expression: str, now: datetime) -> dat
     return now + timedelta(hours=1)
 
 
-def _parse_next_run(cron_expression: str) -> str:
-    now = datetime.now(timezone.utc)
+def _parse_next_run_datetime(cron_expression: str, now: datetime) -> datetime:
     try:
         from croniter import croniter  # type: ignore[import-untyped]
         cron = croniter(cron_expression, now)
-        return cron.get_next(datetime).isoformat()
+        next_run = cron.get_next(datetime)
+        if next_run.tzinfo is None:
+            next_run = next_run.replace(tzinfo=timezone.utc)
+        return next_run
     except ImportError:
         pass
 
-    return _parse_next_run_without_croniter(cron_expression, now).isoformat()
+    return _parse_next_run_without_croniter(cron_expression, now)
+
+
+def _parse_next_run(cron_expression: str, now: datetime | None = None) -> str:
+    base = now or datetime.now(timezone.utc)
+    return _parse_next_run_datetime(cron_expression, base).isoformat()
+
+
+def _parse_next_run_after(cron_expression: str, after: datetime) -> str:
+    return _parse_next_run_datetime(cron_expression, after).isoformat()
 
 
 @dataclass(slots=True)
@@ -233,8 +244,15 @@ def _build_job_question(action: CreateForwardTestAction, schedule: dict[str, str
     return base + default_instruction
 
 
-def _create_scheduled_job(user_id: str, state: Any, question: str, cron: str) -> tuple[str | None, str]:
-    next_run_at = _parse_next_run(cron)
+def _create_scheduled_job(
+    user_id: str,
+    state: Any,
+    question: str,
+    cron: str,
+    *,
+    after: datetime | None = None,
+) -> tuple[str | None, str]:
+    next_run_at = _parse_next_run_after(cron, after) if after else _parse_next_run(cron)
     job_result = _supabase_request(
         "scheduled_jobs",
         method="POST",
@@ -363,13 +381,15 @@ def _execute(action: CreateForwardTestAction, conversation: Any) -> CreateForwar
                     job_ids=job_ids,
                 )
 
+        schedule_after = datetime.fromisoformat(next_run_at)
         for schedule in schedules[1:]:
             question = _build_job_question(action, schedule, ft_id)
-            extra_job_id, _ = _create_scheduled_job(
+            extra_job_id, extra_next_run_at = _create_scheduled_job(
                 user_id,
                 state,
                 question,
                 schedule["cron_expression"],
+                after=schedule_after,
             )
             if not extra_job_id:
                 return CreateForwardTestObservation(
@@ -381,6 +401,7 @@ def _execute(action: CreateForwardTestAction, conversation: Any) -> CreateForwar
                 )
             _link_forward_test_job(ft_id, extra_job_id, schedule["role"])
             job_ids.append(extra_job_id)
+            schedule_after = datetime.fromisoformat(extra_next_run_at)
 
         return CreateForwardTestObservation(
             success=True,

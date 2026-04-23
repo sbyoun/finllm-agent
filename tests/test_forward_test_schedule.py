@@ -5,6 +5,7 @@ from agent_runtime.tool.forward_test.create_forward_test import (
     CreateForwardTestAction,
     _build_job_question,
     _build_schedules,
+    _parse_next_run,
     _parse_next_run_without_croniter,
 )
 
@@ -53,6 +54,17 @@ class ForwardTestScheduleTests(unittest.TestCase):
                 {"role": "buy", "cron_expression": "0 2 * * 1-5", "prompt": "3종목 매수"},
                 {"role": "sell", "cron_expression": "0 6 * * 1-5", "prompt": "전량 매도"},
             ],
+        )
+
+    def test_follow_up_schedule_is_aligned_after_primary_run(self) -> None:
+        primary_next = datetime(2026, 4, 24, 2, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            _parse_next_run(
+                "0 6 * * 1-5",
+                now=primary_next,
+            ),
+            "2026-04-24T06:00:00+00:00",
         )
 
     def test_extra_schedule_prompt_can_reference_same_forward_test(self) -> None:
