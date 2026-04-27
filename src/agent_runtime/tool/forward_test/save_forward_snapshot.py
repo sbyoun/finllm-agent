@@ -107,6 +107,52 @@ def _normalize_trades(trades: list[dict] | None, holdings: list[dict] | None) ->
     return normalized
 
 
+def _complete_initial_buy_trades(trades: list[dict] | None, holdings: list[dict]) -> list[dict] | None:
+    if not holdings:
+        return trades
+
+    completed = list(trades or [])
+    traded_symbols = {
+        str(trade.get("symbol") or "").strip()
+        for trade in completed
+        if isinstance(trade, dict) and _trade_side(trade) == "buy"
+    }
+
+    for holding in holdings:
+        if not isinstance(holding, dict):
+            continue
+        symbol = str(holding.get("symbol") or "").strip()
+        if not symbol or symbol in traded_symbols:
+            continue
+        qty = _first_number(holding, ("qty", "shares", "quantity", "units"))
+        price = _first_number(
+            holding,
+            (
+                "current_price",
+                "mark_price",
+                "close_price",
+                "price",
+                "avg_cost",
+                "avg_price",
+            ),
+        )
+        if qty <= 0 or price <= 0:
+            continue
+        completed.append(
+            {
+                "symbol": symbol,
+                "name": holding.get("name") or symbol,
+                "side": "buy",
+                "qty": qty,
+                "price": price,
+                "reason": "초기 포워드 테스트 편입",
+            }
+        )
+        traded_symbols.add(symbol)
+
+    return completed
+
+
 def _trade_amount(trade: dict) -> float:
     amount = _as_float(trade.get("amount"), default=-1)
     if amount >= 0:
@@ -302,6 +348,8 @@ def _execute(action: SaveForwardSnapshotAction, conversation: Any) -> SaveForwar
         initial_capital = _fetch_initial_capital(action.forward_test_id)
         is_first_snapshot = _is_first_snapshot(action.forward_test_id)
         trades = _normalize_trades(action.trades, action.holdings)
+        if is_first_snapshot:
+            trades = _complete_initial_buy_trades(trades, action.holdings)
         trades = _refresh_trade_prices(trades)
         holdings = _apply_trade_prices_to_holdings(action.holdings, trades)
         cash = action.cash

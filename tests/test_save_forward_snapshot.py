@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from agent_runtime.tool.forward_test.save_forward_snapshot import (
     _apply_trade_prices_to_holdings,
+    _complete_initial_buy_trades,
     _compute_first_snapshot_cash,
     _compute_cash_after_trades,
     _compute_return_pct,
@@ -82,6 +83,21 @@ class SaveForwardSnapshotTests(unittest.TestCase):
 
         self.assertEqual(trades[0]["side"], "buy")
         self.assertEqual(trades[0]["symbol"], "010140")
+
+    def test_complete_initial_buy_trades_adds_missing_holdings(self) -> None:
+        trades = _complete_initial_buy_trades(
+            [{"symbol": "AAA", "side": "buy", "qty": 1, "price": 1000}],
+            [
+                {"symbol": "AAA", "name": "A", "qty": 1, "current_price": 1000},
+                {"symbol": "BBB", "name": "B", "qty": 2, "current_price": 1500},
+            ],
+        )
+
+        self.assertEqual(len(trades), 2)
+        self.assertEqual(trades[1]["symbol"], "BBB")
+        self.assertEqual(trades[1]["side"], "buy")
+        self.assertEqual(trades[1]["qty"], 2)
+        self.assertEqual(trades[1]["price"], 1500)
 
     def test_refresh_trade_prices_uses_kis_quote_for_kr_ticker(self) -> None:
         with patch(
