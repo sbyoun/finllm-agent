@@ -65,11 +65,46 @@ def _compute_return_pct(total_value: float, initial_capital: Any, fallback: Any 
 
 def _trade_side(trade: dict) -> str:
     raw = str(trade.get("side") or trade.get("action") or "").strip().lower()
-    if raw in {"매수", "buy", "b"}:
+    if raw in {"매수", "buy", "b"} or "매수" in raw or raw.startswith("buy"):
         return "buy"
-    if raw in {"매도", "sell", "s"}:
+    if raw in {"매도", "sell", "s"} or "매도" in raw or raw.startswith("sell"):
         return "sell"
     return raw
+
+
+def _normalize_trades(trades: list[dict] | None, holdings: list[dict] | None) -> list[dict] | None:
+    if not trades:
+        return trades
+
+    symbol_by_name: dict[str, str] = {}
+    name_by_symbol: dict[str, str] = {}
+    for holding in holdings or []:
+        if not isinstance(holding, dict):
+            continue
+        name = str(holding.get("name") or "").strip()
+        symbol = str(holding.get("symbol") or "").strip()
+        if name and symbol:
+            symbol_by_name[name] = symbol
+            name_by_symbol[symbol] = name
+
+    normalized: list[dict] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        item = dict(trade)
+        side = _trade_side(item)
+        if side in {"buy", "sell"}:
+            item["side"] = side
+
+        symbol = str(item.get("symbol") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not symbol and name in symbol_by_name:
+            item["symbol"] = symbol_by_name[name]
+        if not name and symbol in name_by_symbol:
+            item["name"] = name_by_symbol[symbol]
+        normalized.append(item)
+
+    return normalized
 
 
 def _trade_amount(trade: dict) -> float:
@@ -187,21 +222,29 @@ def _fetch_initial_capital(forward_test_id: str) -> float:
     return 0
 
 
-def _fetch_latest_snapshot_cash(forward_test_id: str) -> float:
+def _fetch_latest_snapshot_cash(forward_test_id: str) -> float | None:
     result = _supabase_request(
         f"forward_snapshots?forward_test_id=eq.{forward_test_id}"
         "&select=cash&order=snapshot_at.desc&limit=1"
     )
     if isinstance(result, list) and result:
-        return _as_float(result[0].get("cash"), default=-1)
-    return -1
+        return _as_float(result[0].get("cash"))
+    return None
 
 
 def _starting_cash(forward_test_id: str, initial_capital: float) -> float:
     previous_cash = _fetch_latest_snapshot_cash(forward_test_id)
-    if previous_cash >= 0:
+    if previous_cash is not None:
         return previous_cash
     return initial_capital
+
+
+def _is_first_snapshot(forward_test_id: str) -> bool:
+    return _fetch_latest_snapshot_cash(forward_test_id) is None
+
+
+def _compute_first_snapshot_cash(initial_capital: float, holdings: list[dict]) -> float:
+    return initial_capital - _compute_total_value(holdings, 0)
 
 
 @dataclass(slots=True)
@@ -257,10 +300,17 @@ def _execute(action: SaveForwardSnapshotAction, conversation: Any) -> SaveForwar
 
     try:
         initial_capital = _fetch_initial_capital(action.forward_test_id)
-        trades = _refresh_trade_prices(action.trades)
+        is_first_snapshot = _is_first_snapshot(action.forward_test_id)
+        trades = _normalize_trades(action.trades, action.holdings)
+        trades = _refresh_trade_prices(trades)
         holdings = _apply_trade_prices_to_holdings(action.holdings, trades)
         cash = action.cash
-        if trades:
+        if is_first_snapshot and holdings:
+            # On the initial snapshot there are no prior positions. The final
+            # holdings define the invested amount, even if the model omitted
+            # some trade rows or supplied stale cash.
+            cash = _compute_first_snapshot_cash(initial_capital, holdings)
+        elif trades:
             cash = _compute_cash_after_trades(
                 _starting_cash(action.forward_test_id, initial_capital),
                 trades,

@@ -3,10 +3,13 @@ from unittest.mock import patch
 
 from agent_runtime.tool.forward_test.save_forward_snapshot import (
     _apply_trade_prices_to_holdings,
+    _compute_first_snapshot_cash,
     _compute_cash_after_trades,
     _compute_return_pct,
     _compute_total_value,
+    _normalize_trades,
     _refresh_trade_prices,
+    _starting_cash,
 )
 
 
@@ -52,6 +55,33 @@ class SaveForwardSnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual(cash, 9000)
+
+    def test_starting_cash_preserves_negative_previous_cash(self) -> None:
+        with patch(
+            "agent_runtime.tool.forward_test.save_forward_snapshot._fetch_latest_snapshot_cash",
+            return_value=-4202430,
+        ):
+            self.assertEqual(_starting_cash("ft-1", 100_000_000), -4202430)
+
+    def test_first_snapshot_cash_uses_all_final_holdings(self) -> None:
+        cash = _compute_first_snapshot_cash(
+            100_000_000,
+            [
+                {"symbol": "AAA", "qty": 10, "current_price": 5_000_000},
+                {"symbol": "BBB", "qty": 5, "current_price": 8_000_000},
+            ],
+        )
+
+        self.assertEqual(cash, 10_000_000)
+
+    def test_normalize_trades_repairs_side_and_missing_symbol_from_holdings(self) -> None:
+        trades = _normalize_trades(
+            [{"name": "삼성중공업", "side": "buy,symbol:", "qty": 145, "price": 34400}],
+            [{"name": "삼성중공업", "symbol": "010140", "qty": 145, "current_price": 34400}],
+        )
+
+        self.assertEqual(trades[0]["side"], "buy")
+        self.assertEqual(trades[0]["symbol"], "010140")
 
     def test_refresh_trade_prices_uses_kis_quote_for_kr_ticker(self) -> None:
         with patch(
