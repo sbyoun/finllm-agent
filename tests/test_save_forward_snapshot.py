@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from agent_runtime.tool.forward_test.save_forward_snapshot import (
     _apply_trade_prices_to_holdings,
+    _build_holdings_from_ledger,
     _complete_initial_buy_trades,
     _compute_first_snapshot_cash,
     _compute_cash_after_trades,
@@ -11,6 +12,7 @@ from agent_runtime.tool.forward_test.save_forward_snapshot import (
     _normalize_trades,
     _refresh_trade_prices,
     _starting_cash,
+    _validate_reported_holdings_match_computed,
 )
 
 
@@ -45,6 +47,26 @@ class SaveForwardSnapshotTests(unittest.TestCase):
 
         self.assertEqual(holdings[0]["current_price"], 2500)
 
+    def test_apply_trade_prices_forces_initial_buy_cost_basis(self) -> None:
+        holdings = _apply_trade_prices_to_holdings(
+            [{"symbol": "005930", "qty": 1, "avg_cost": 2000, "current_price": 2000}],
+            [{"symbol": "005930", "side": "buy", "qty": 1, "price": 2500}],
+            force_buy_cost_basis=True,
+        )
+
+        self.assertEqual(holdings[0]["avg_cost"], 2500)
+        self.assertEqual(holdings[0]["current_price"], 2500)
+
+    def test_apply_trade_prices_uses_weighted_average_for_additional_buy(self) -> None:
+        holdings = _apply_trade_prices_to_holdings(
+            [{"symbol": "005930", "qty": 3, "avg_cost": 1200, "current_price": 1500}],
+            [{"symbol": "005930", "side": "buy", "qty": 1, "price": 1500}],
+            previous_holdings=[{"symbol": "005930", "qty": 2, "avg_cost": 1000}],
+        )
+
+        self.assertEqual(holdings[0]["avg_cost"], 3500 / 3)
+        self.assertEqual(holdings[0]["current_price"], 1500)
+
     def test_compute_cash_after_trades_uses_trade_execution_prices(self) -> None:
         cash = _compute_cash_after_trades(
             10000,
@@ -56,6 +78,55 @@ class SaveForwardSnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual(cash, 9000)
+
+    def test_compute_cash_after_trades_preserves_negative_starting_cash(self) -> None:
+        cash = _compute_cash_after_trades(
+            -1000,
+            [{"symbol": "AAA", "side": "sell", "qty": 2, "price": 800}],
+            fallback_cash=0,
+        )
+
+        self.assertEqual(cash, 600)
+
+    def test_build_holdings_from_ledger_applies_buy_and_sell(self) -> None:
+        holdings, errors = _build_holdings_from_ledger(
+            [{"symbol": "AAA", "name": "A", "qty": 3, "avg_cost": 1000, "current_price": 1100}],
+            [
+                {"symbol": "AAA", "name": "A", "side": "buy", "qty": 1, "price": 1600},
+                {"symbol": "AAA", "name": "A", "side": "sell", "qty": 2, "price": 1500},
+                {"symbol": "BBB", "name": "B", "side": "buy", "qty": 2, "price": 500},
+            ],
+            [
+                {"symbol": "AAA", "name": "A", "qty": 2, "current_price": 1500},
+                {"symbol": "BBB", "name": "B", "qty": 2, "current_price": 500},
+            ],
+        )
+
+        by_symbol = {h["symbol"]: h for h in holdings}
+        self.assertEqual(errors, [])
+        self.assertEqual(by_symbol["AAA"]["qty"], 2)
+        self.assertEqual(by_symbol["AAA"]["avg_cost"], 1150)
+        self.assertEqual(by_symbol["AAA"]["current_price"], 1500)
+        self.assertEqual(by_symbol["BBB"]["qty"], 2)
+        self.assertEqual(by_symbol["BBB"]["avg_cost"], 500)
+
+    def test_build_holdings_from_ledger_rejects_oversell(self) -> None:
+        holdings, errors = _build_holdings_from_ledger(
+            [{"symbol": "AAA", "qty": 1, "avg_cost": 1000}],
+            [{"symbol": "AAA", "side": "sell", "qty": 2, "price": 900}],
+            [{"symbol": "AAA", "qty": 0}],
+        )
+
+        self.assertEqual(holdings[0]["qty"], 1)
+        self.assertTrue(errors)
+
+    def test_validate_reported_holdings_catches_unexplained_position_change(self) -> None:
+        errors = _validate_reported_holdings_match_computed(
+            [{"symbol": "AAA", "qty": 0}],
+            [{"symbol": "AAA", "qty": 3}],
+        )
+
+        self.assertTrue(errors)
 
     def test_starting_cash_preserves_negative_previous_cash(self) -> None:
         with patch(
@@ -109,6 +180,7 @@ class SaveForwardSnapshotTests(unittest.TestCase):
             )
 
         self.assertEqual(trades[0]["price"], 72000)
+        self.assertEqual(trades[0]["amount"], 144000)
 
     def test_refresh_trade_prices_falls_back_to_input_price_on_quote_failure(self) -> None:
         with patch(

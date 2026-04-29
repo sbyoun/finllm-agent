@@ -222,8 +222,10 @@ def _build_job_question(action: CreateForwardTestAction, schedule: dict[str, str
         )
         default_instruction = (
             "screening_sql을 오늘 날짜로 실행하여 종목을 선정하고, "
-            "현재가를 조회한 뒤 균등 배분으로 리밸런싱하세요. "
-            "완료 후 save_forward_snapshot을 호출하세요."
+            "현재가를 조회한 뒤 가용 현금 안에서 균등 배분으로 리밸런싱하세요. "
+            "완료 후 execute_forward_trades에 주문 의도만 전달하세요. "
+            "cash, holdings, avg_cost, total_value, return_pct, execution price는 직접 계산하지 마세요. "
+            "단, 이 지시는 스케줄 실행 시점에 적용되며 생성 직후 즉시 실행하지 마세요."
         )
     else:
         base = (
@@ -236,7 +238,9 @@ def _build_job_question(action: CreateForwardTestAction, schedule: dict[str, str
         )
         default_instruction = (
             "전략에 따라 현재 schedule_role에 맞는 판단을 수행하세요. "
-            "완료 후 save_forward_snapshot을 호출하세요."
+            "완료 후 execute_forward_trades에 주문 의도만 전달하세요. "
+            "cash, holdings, avg_cost, total_value, return_pct, execution price는 직접 계산하지 마세요. "
+            "단, 이 지시는 스케줄 실행 시점에 적용되며 생성 직후 즉시 실행하지 마세요."
         )
 
     if schedule_prompt:
@@ -505,7 +509,9 @@ def make_create_forward_test_tool() -> CreateForwardTestTool:
             "에이전트가 자동으로 페이퍼 매매를 실행합니다. "
             "SQL 기반(백테스트 screening_sql 재사용) 또는 LLM 기반(자연어 전략)을 선택할 수 있습니다. "
             "하나의 요청에 여러 시각/역할이 있으면 schedules 배열로 여러 scheduled_job을 만들고 "
-            "모두 같은 forward_test_id에 연결하세요."
+            "모두 같은 forward_test_id에 연결하세요. "
+            "생성은 주문 실행이 아니므로 사용자가 즉시 1회 실행을 명시하지 않았다면 "
+            "생성 직후 execute_forward_trades를 호출하지 마세요."
         ),
         action_type=CreateForwardTestAction,
         observation_type=CreateForwardTestObservation,
