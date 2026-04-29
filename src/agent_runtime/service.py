@@ -31,7 +31,7 @@ from agent_runtime.tool.jobs.register_job import make_register_job_tool
 from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation, make_run_backtest_tool
 from agent_runtime.tool.forward_test import (
     make_create_forward_test_tool,
-    make_save_forward_snapshot_tool,
+    make_execute_forward_trades_tool,
     make_get_forward_test_tool,
 )
 
@@ -268,7 +268,7 @@ def _build_tools(*, repo_root: Path):
         make_register_job_tool(),
         make_run_backtest_tool(),
         make_create_forward_test_tool(),
-        make_save_forward_snapshot_tool(),
+        make_execute_forward_trades_tool(),
         make_get_forward_test_tool(),
     ]
 
