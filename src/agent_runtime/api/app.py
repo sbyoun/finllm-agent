@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent_runtime.llm import RuntimeLlmConfig
+from agent_runtime.market_calendar import build_snapshot
 from agent_runtime.service import RuntimeAgentRequest, RuntimeMessageContext, run_agent_request, run_agent_request_json
 
 
@@ -68,6 +69,18 @@ def _resolve_repo_root() -> Path:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/market-calendar/snapshot")
+def market_calendar_snapshot(date: str | None = None) -> JSONResponse:
+    from datetime import date as date_cls
+
+    target = date_cls.fromisoformat(date) if date else None
+    try:
+        snap = build_snapshot(target)
+        return JSONResponse(snap.to_dict())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": str(exc)}, status_code=502)
 
 
 @app.post("/runs/sync")
