@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,16 @@ from agent_runtime.tool.news.search_news import SearchNewsAction, SearchNewsObse
 from agent_runtime.tool.portfolio.get_portfolio import GetPortfolioObservation
 from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation
 from agent_runtime.tool.sql.run_sql import RunSQLAction, RunSQLObservation
+
+
+_BACKTEST_REQUEST_RE = re.compile(
+    r"(백테스트|backtest|과거\s*성과|성과\s*검증|누적\s*수익|mdd|cagr|샤프|sharpe|시뮬레이션)",
+    re.IGNORECASE,
+)
+_FOLLOW_UP_CORRECTION_RE = re.compile(
+    r"(고쳐|수정|정정|다시|반영|적용|계산|정의|필터|제외|처리|nulls\s+last|stddev|sqrt|volatility|변동성)",
+    re.IGNORECASE,
+)
 
 
 def _tool_call_key(tool_call: LLMToolCall) -> str:
@@ -108,6 +119,12 @@ class Agent(AgentBase):
             rendered = str(value)
         return self._truncate_text(rendered, limit=limit)
 
+    def _json_for_context(self, value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        except Exception:  # noqa: BLE001
+            return str(value)
+
     def _append_recent_tool_history(
         self,
         conversation: LocalConversation,
@@ -133,6 +150,12 @@ class Agent(AgentBase):
             summary["sql"] = action.sql
             if action.title:
                 summary["title"] = action.title
+            if action.method_summary:
+                summary["method_summary"] = action.method_summary
+            if action.assumptions:
+                summary["assumptions"] = action.assumptions
+            if action.caveats:
+                summary["caveats"] = action.caveats
         elif isinstance(action, SearchNewsAction):
             summary["query"] = action.query
 
@@ -152,6 +175,12 @@ class Agent(AgentBase):
                 summary["strategy_name"] = action.strategy_name
             if hasattr(action, "screening_sql"):
                 summary["screening_sql"] = action.screening_sql
+            if hasattr(action, "method_summary") and action.method_summary:
+                summary["method_summary"] = action.method_summary
+            if hasattr(action, "assumptions") and action.assumptions:
+                summary["assumptions"] = action.assumptions
+            if hasattr(action, "caveats") and action.caveats:
+                summary["caveats"] = action.caveats
             if hasattr(action, "months") and action.months > 0:
                 summary["months"] = action.months
             elif hasattr(action, "years"):
@@ -193,13 +222,37 @@ class Agent(AgentBase):
         last_sql = agent_state.get("last_successful_sql")
         if isinstance(last_sql, dict) and last_sql:
             columns = last_sql.get("columns") or []
-            rows_preview = last_sql.get("rows_preview") or []
+            rows = last_sql.get("rows")
+            if not isinstance(rows, list):
+                rows = last_sql.get("rows_preview") or []
             title = str(last_sql.get("title") or "SQL Result")
-            lines.append(f"- Last SQL result: {title}")
+            method_summary = str(last_sql.get("method_summary") or "").strip()
+            assumptions = str(last_sql.get("assumptions") or "").strip()
+            caveats = str(last_sql.get("caveats") or "").strip()
+
+            lines.append("")
+            lines.append("### Full Last Successful SQL Result")
+            lines.append(f"- Title: {title}")
+            lines.append(f"- Row count: {last_sql.get('row_count', '')}")
             if isinstance(columns, list) and columns:
-                lines.append(f"  columns: {', '.join(str(column) for column in columns[:12])}")
-            if isinstance(rows_preview, list) and rows_preview:
-                lines.append(f"  preview: {self._safe_json(rows_preview[:3])}")
+                lines.append(f"- Columns: {', '.join(str(column) for column in columns)}")
+            if method_summary:
+                lines.append(f"- Method summary: {method_summary}")
+            if assumptions:
+                lines.append(f"- Assumptions: {assumptions}")
+            if caveats:
+                lines.append(f"- Caveats: {caveats}")
+            sql = str(last_sql.get("sql") or "").strip()
+            if sql:
+                lines.append("- SQL:")
+                lines.append("```sql")
+                lines.append(sql)
+                lines.append("```")
+            if isinstance(rows, list):
+                lines.append("- Result rows:")
+                lines.append("```json")
+                lines.append(self._json_for_context(rows))
+                lines.append("```")
 
         previous_result = agent_state.get("previousResult")
         if isinstance(previous_result, dict):
@@ -222,20 +275,16 @@ class Agent(AgentBase):
                 title = str(item.get("title") or "").strip()
                 label = title if title else tool
                 if tool == "run_sql" and sql:
-                    sql_oneline = " ".join(sql.split())[:200]
                     status = "EMPTY" if row_count == 0 else f"{row_count} rows"
-                    lines.append(f"- [{label}] {status}, sql: {sql_oneline}")
+                    lines.append(f"- [{label}] {status}")
                 elif tool == "run_backtest" and item.get("success"):
                     bt_name = item.get("strategy_name") or "backtest"
                     period = f"{item['months']}개월" if item.get("months") else f"{item.get('years', '?')}년"
-                    bt_sql = " ".join(str(item.get("screening_sql") or "").split())[:200]
                     lines.append(
                         f"- [BACKTEST EXECUTED: {bt_name}] {period}, "
                         f"CAGR={item.get('cagr_pct')}%, MDD={item.get('mdd_pct')}%, "
                         f"excess={item.get('excess_return_pct')}%p"
                     )
-                    if bt_sql:
-                        lines.append(f"  screening_sql: {bt_sql}")
                 elif row_count != "":
                     lines.append(f"- [{label}] row_count={row_count}")
                 else:
@@ -283,7 +332,11 @@ class Agent(AgentBase):
                     "sql": action.sql,
                     "row_count": observation.row_count,
                     "columns": observation.columns,
-                    "rows_preview": observation.rows[:10],
+                    "rows": observation.rows,
+                    "rows_preview": observation.rows,
+                    "method_summary": action.method_summary,
+                    "assumptions": action.assumptions,
+                    "caveats": action.caveats,
                 },
             )
             return
@@ -332,6 +385,52 @@ class Agent(AgentBase):
             summary=error_summary,
         )
 
+    def _latest_user_message(self, conversation: LocalConversation) -> str:
+        for event in reversed(conversation.state.event_log):
+            if isinstance(event, MessageEvent) and event.role == "user":
+                return event.content or ""
+        return ""
+
+    def _latest_user_message_index(self, conversation: LocalConversation) -> int:
+        for index in range(len(conversation.state.event_log) - 1, -1, -1):
+            event = conversation.state.event_log[index]
+            if isinstance(event, MessageEvent) and event.role == "user":
+                return index
+        return -1
+
+    def _latest_user_requests_backtest(self, conversation: LocalConversation) -> bool:
+        return bool(_BACKTEST_REQUEST_RE.search(self._latest_user_message(conversation)))
+
+    def _latest_user_is_follow_up_correction(self, conversation: LocalConversation) -> bool:
+        latest_user = self._latest_user_message(conversation)
+        if not latest_user:
+            return False
+        if not _FOLLOW_UP_CORRECTION_RE.search(latest_user):
+            return False
+        last_sql = conversation.state.get_agent_state("last_successful_sql")
+        return isinstance(last_sql, dict) and bool(last_sql.get("sql"))
+
+    def _has_sql_observation_after_latest_user(self, conversation: LocalConversation) -> bool:
+        latest_user_index = self._latest_user_message_index(conversation)
+        if latest_user_index < 0:
+            return False
+        for event in conversation.state.event_log[latest_user_index + 1 :]:
+            if isinstance(event, ObservationEvent) and isinstance(event.observation, RunSQLObservation):
+                return True
+        return False
+
+    def _llm_tools_for_step(self, conversation: LocalConversation) -> list[dict]:
+        tools = self.tools
+        if not self._latest_user_requests_backtest(conversation):
+            tools = [tool for tool in tools if tool.name != "run_backtest"]
+
+        if self._latest_user_is_follow_up_correction(conversation) and self._has_sql_observation_after_latest_user(conversation):
+            # Correction turns should patch once, then explain. Keeping tools open
+            # encourages extra SQL/backtest loops and lets the model drift again.
+            return []
+
+        return [tool.as_llm_tool() for tool in tools]
+
     def _init_state(self, conversation: LocalConversation) -> None:
         if self._initialized:
             return
@@ -375,7 +474,7 @@ class Agent(AgentBase):
                 }
             )
 
-        llm_tools = [tool.as_llm_tool() for tool in self.tools]
+        llm_tools = self._llm_tools_for_step(conversation)
         llm_response = self.llm.completion(messages=messages, tools=llm_tools)
         message = self._extract_text_tool_calls(llm_response.message)
 
@@ -431,6 +530,8 @@ class Agent(AgentBase):
                         llm_response_id=llm_response.id,
                     )
                     conversation.state.event_log.append(action_event)
+                    if conversation.event_callback is not None:
+                        conversation.event_callback(action_event)
                     observation = tool(action, conversation)
                     conversation.state.event_log.append(
                         ObservationEvent(

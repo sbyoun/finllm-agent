@@ -4,6 +4,9 @@
 - stocks가 앵커. stock_id는 stocks.id에서. 없는 컬럼 상상 금지. proxy 대체 금지.
 - Oracle: `;` 금지, `LIMIT` 금지 → `FETCH FIRST`, `"date"` 쌍따옴표, `TO_DATE()`.
 - Oracle 집계: SELECT에 `MAX/MIN/SUM/COUNT`와 일반 컬럼을 섞으면 반드시 `GROUP BY`에 일반 컬럼 포함. 안 하면 `ORA-00937`. 집계 결과를 단일 값으로 쓰려면 서브쿼리/CTE로 분리할 것.
+- Oracle window: `LAG/LEAD/ROW_NUMBER/RANK ... OVER (...)`를 `STDDEV/AVG/SUM/MAX/MIN/COUNT` 안에 넣으면 `ORA-30483`. window CTE에서 `ret/rn`을 먼저 만들고, outer CTE에서 `STDDEV(ret)`, `AVG(turnover)`를 `GROUP BY stock_id`로 집계.
+- Oracle ranking NULL: 높은 값이 좋은 팩터는 `RANK() OVER (ORDER BY factor DESC NULLS LAST)` 또는 NULL 행 제외. `DESC`만 쓰면 NULL이 상위 후보에 섞일 수 있음.
+- 랭킹 방향: `RANK(... DESC NULLS LAST)` 합산은 낮을수록 좋음 → `ORDER BY rank_sum ASC`. `PERCENT_RANK(... DESC)` 합산도 낮을수록 좋음. 높게 만들려면 `1-PERCENT_RANK()`.
 - 넓은 표현: 실적→매출/영업이익/순이익, 밸류→PER/PBR/EV_EBITDA, 수급→순매수.
 - 같은 목표의 SQL은 **최대 3회** (에러·빈 결과 모두). 3회 후 결과 없으면 즉시 unavailable 안내, 우회 시도 금지. 성공한 SQL 반복 금지.
 

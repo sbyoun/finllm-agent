@@ -15,6 +15,9 @@ DB 질문이면 이 문서를 기준으로 SQL을 작성한다.
 - `낮은/높은/상위/하위` → SQL의 `where` 또는 `order by`에 반영.
 - Oracle: `;` 금지, `LIMIT` 금지 → `FETCH FIRST N ROWS ONLY`, `"date"` 쌍따옴표 필수, 날짜는 `TO_DATE('YYYY-MM-DD','YYYY-MM-DD')`.
 - Oracle 집계 함수 규칙: SELECT에 `MAX/MIN/SUM/COUNT/AVG` 같은 집계 함수와 일반 컬럼을 함께 쓸 때 반드시 일반 컬럼을 `GROUP BY`에 포함해야 한다. 누락하면 `ORA-00937: not a single-group group function` 에러. 집계 결과를 단일 스칼라 값으로 쓰려면 서브쿼리나 CTE로 분리할 것. 예: `CROSS JOIN (SELECT MAX(close) as bm_close FROM benchmark_daily_prices WHERE ...) bm`.
+- Oracle analytic/window 함수 규칙: `LAG/LEAD/ROW_NUMBER/RANK ... OVER (...)`는 `STDDEV/AVG/SUM/MAX/MIN/COUNT` 같은 집계 함수 안에 넣으면 `ORA-30483: window functions are not allowed here`가 난다. `AVG(x) OVER (...)` 같은 analytic aggregate도 grouped aggregate와 섞지 않는다. 반드시 CTE를 분리한다. 예: `returns` CTE에서 `LAG(close) OVER (...) AS prev_close`, `ret`, `ROW_NUMBER() ... AS rn`을 계산하고, 바깥 `vol` CTE에서 `WHERE rn <= 63 GROUP BY stock_id` 후 `STDDEV(ret) * SQRT(252)`를 계산한다.
+- Oracle ranking NULL 규칙: `RANK()/DENSE_RANK()/PERCENT_RANK() OVER (ORDER BY factor DESC)`는 NULL이 상위에 올 수 있다. "높을수록 좋음" 팩터 랭킹은 반드시 `DESC NULLS LAST`를 붙이거나 랭킹 전에 해당 팩터 NULL 행을 제외한다. 여러 팩터 합산 랭킹에서 결측 팩터가 상위 후보에 들어오면 안 된다.
+- 팩터 합산 랭킹 방향: `RANK() OVER (ORDER BY factor DESC NULLS LAST)`는 좋은 종목이 rank 1이므로 `rank_sum`은 **낮을수록 좋다**. 최종 정렬은 `ORDER BY rank_sum ASC`. `PERCENT_RANK() OVER (ORDER BY factor DESC NULLS LAST)`도 좋은 값이 0에 가까우므로 합산값은 `ASC` 정렬한다. 높은 점수로 만들려면 `1 - PERCENT_RANK()`로 뒤집은 뒤 `DESC`.
 
 ## 데이터 커버리지
 

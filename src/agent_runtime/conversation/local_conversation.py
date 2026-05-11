@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from agent_runtime.agent.base import AgentBase
 from agent_runtime.conversation.base import BaseConversation
@@ -12,6 +13,7 @@ from agent_runtime.event.message import MessageEvent
 class LocalConversation(BaseConversation):
     agent: AgentBase
     state: ConversationState
+    event_callback: Callable[[object], None] | None = None
 
     def send_message(self, message: str) -> None:
         if self.state.execution_status in (

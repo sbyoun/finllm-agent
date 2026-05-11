@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +35,47 @@ _US_UNIVERSES = {"SP500", "NASDAQ"}
 _KR_REBALANCE_SCHEDULE = [(4,), (6,), (9,), (12,)]
 _US_REBALANCE_SCHEDULE = [(3,), (6,), (9,), (12,)]
 
+_BACKTEST_REQUEST_RE = re.compile(
+    r"(백테스트|backtest|과거\s*성과|성과\s*검증|누적\s*수익|mdd|cagr|샤프|sharpe|시뮬레이션)",
+    re.IGNORECASE,
+)
+
+_LOOKBACK_PRICE_ANCHOR_RE = re.compile(
+    r"(?P<date_expr>(?P<price_alias>[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*\"date\")"
+    r"\s+between\s+"
+    r"(?P<anchor>(?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)?m(?:1|6|9|12|24|36)_dt)"
+    r"\s+and\s+"
+    r"(?P<ref>(?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)?ref_dt)\b",
+    re.IGNORECASE,
+)
+
+_GLOBAL_PRICE_DATE_ANCHOR_RE = re.compile(
+    r"\(\s*select\s+max\s*\(\s*(?:(?P<max_alias>[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?\"date\"\s*\)"
+    r"\s+from\s+daily_prices(?:\s+(?!where\b)(?P<table_alias>[A-Za-z_][A-Za-z0-9_$]*))?"
+    r"\s+where\s+",
+    re.IGNORECASE,
+)
+
+_DATE_LE_PREDICATE_RE = re.compile(
+    r"^\s*(?:(?P<alias>[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?\"date\"\s*<=\s*(?P<target>.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _latest_user_message(conversation: Any) -> str:
+    state = getattr(conversation, "state", None)
+    event_log = getattr(state, "event_log", None)
+    if event_log is None:
+        return ""
+    for event in reversed(list(event_log)):
+        if getattr(event, "role", None) == "user":
+            return str(getattr(event, "content", "") or "")
+    return ""
+
+
+def _explicitly_requests_backtest(conversation: Any) -> bool:
+    return bool(_BACKTEST_REQUEST_RE.search(_latest_user_message(conversation)))
+
 
 def _rebalance_schedule(universe: str) -> list[tuple[int]]:
     return _KR_REBALANCE_SCHEDULE if universe in _KR_UNIVERSES else _US_REBALANCE_SCHEDULE
@@ -41,6 +83,141 @@ def _rebalance_schedule(universe: str) -> list[tuple[int]]:
 
 def _benchmark_symbol(universe: str) -> str:
     return "KS11" if universe in _KR_UNIVERSES else "SPY"
+
+
+def _find_matching_paren(text: str, open_index: int) -> int | None:
+    depth = 0
+    in_single_quote = False
+    in_double_quote = False
+    i = open_index
+    while i < len(text):
+        ch = text[i]
+        if ch == "'" and not in_double_quote:
+            if in_single_quote and i + 1 < len(text) and text[i + 1] == "'":
+                i += 2
+                continue
+            in_single_quote = not in_single_quote
+        elif ch == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+        elif not in_single_quote and not in_double_quote:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+        i += 1
+    return None
+
+
+def _universe_stock_predicate(stock_alias: str, universe: str | None) -> str | None:
+    normalized_universe = (universe or "").upper()
+    if normalized_universe in _KR_UNIVERSES:
+        return (
+            f"{stock_alias}.country = 'KR' "
+            f"AND {stock_alias}.market = '{normalized_universe}' "
+            f"AND {stock_alias}.instrument_type = 'stock'"
+        )
+    if normalized_universe == "SP500":
+        return (
+            f"{stock_alias}.country = 'US' "
+            f"AND {stock_alias}.market = 'SP500' "
+            f"AND {stock_alias}.instrument_type = 'stock'"
+        )
+    if normalized_universe == "NASDAQ":
+        return (
+            f"{stock_alias}.country = 'US' "
+            f"AND {stock_alias}.market = 'NASDAQ' "
+            f"AND {stock_alias}.instrument_type = 'stock'"
+        )
+    return None
+
+
+def _normalize_global_price_date_anchors(screening_sql: str, universe: str | None) -> tuple[str, list[str]]:
+    """Scope global daily_prices MAX(date) anchors to the requested universe.
+
+    Without this, a KR backtest can pick a non-KR trading date from another market.
+    That date then has zero KOSPI rows, causing empty monthly holdings.
+    """
+    stock_predicate = _universe_stock_predicate("fa_market_stock", universe)
+    if not stock_predicate:
+        return screening_sql, []
+
+    notes: list[str] = []
+    parts: list[str] = []
+    cursor = 0
+
+    for match in _GLOBAL_PRICE_DATE_ANCHOR_RE.finditer(screening_sql):
+        if match.start() < cursor:
+            continue
+        close_index = _find_matching_paren(screening_sql, match.start())
+        if close_index is None:
+            continue
+
+        where_clause = screening_sql[match.end():close_index].strip()
+        lowered_where = where_clause.lower()
+        if any(token in lowered_where for token in ("stock_id", "country", "market", "instrument_type", "ticker", "symbol")):
+            continue
+
+        predicate_match = _DATE_LE_PREDICATE_RE.match(where_clause)
+        if not predicate_match:
+            continue
+
+        target_expr = predicate_match.group("target").strip()
+        compact_target = re.sub(r"\s+", "", target_expr)
+        parts.append(screening_sql[cursor:match.start()])
+        parts.append(
+            "("
+            "SELECT MAX(fa_market_dp.\"date\") "
+            "FROM daily_prices fa_market_dp "
+            "JOIN stocks fa_market_stock ON fa_market_stock.id = fa_market_dp.stock_id "
+            f"WHERE {stock_predicate} "
+            f"AND fa_market_dp.\"date\" <= {target_expr}"
+            ")"
+        )
+        notes.append(f"global MAX(daily_prices.date <= {compact_target}) -> {universe} universe MAX(date <= {compact_target})")
+        cursor = close_index + 1
+
+    if not parts:
+        return screening_sql, []
+
+    parts.append(screening_sql[cursor:])
+    return "".join(parts), notes
+
+
+def _normalize_screening_sql_date_anchors(screening_sql: str, universe: str | None = None) -> tuple[str, list[str]]:
+    """Force lookback price anchors to use the previous trading day.
+
+    LLM-generated screening SQL sometimes searches a price anchor with:
+      price."date" BETWEEN m12_dt AND ref_dt
+    That finds the first trading day after m12_dt when m12_dt is a holiday.
+    For return lookbacks the invariant is the latest trading day <= m12_dt.
+    """
+    notes: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        date_expr = match.group("date_expr")
+        price_alias = match.group("price_alias")
+        anchor = match.group("anchor")
+        ref = match.group("ref")
+        normalized_anchor = re.sub(r"\s+", "", anchor)
+        normalized_ref = re.sub(r"\s+", "", ref)
+        notes.append(
+            f"{date_expr} BETWEEN {normalized_anchor} AND {normalized_ref} -> "
+            f"same-stock MAX(date <= {normalized_anchor})"
+        )
+        return (
+            f"{date_expr} = ("
+            f"SELECT MAX(fa_anchor_dp.\"date\") "
+            f"FROM daily_prices fa_anchor_dp "
+            f"WHERE fa_anchor_dp.stock_id = {price_alias}.stock_id "
+            f"AND fa_anchor_dp.\"date\" <= {anchor}"
+            f")"
+        )
+
+    normalized_sql = _LOOKBACK_PRICE_ANCHOR_RE.sub(replace, screening_sql)
+    normalized_sql, global_notes = _normalize_global_price_date_anchors(normalized_sql, universe)
+    return normalized_sql, notes + global_notes
 
 
 def _supabase_post(table: str, body: dict) -> Any:
@@ -314,6 +491,9 @@ class RunBacktestAction(Action):
     years: int = 5
     rebalance: str = "quarterly"
     months: int = 0
+    method_summary: str | None = None
+    assumptions: str | None = None
+    caveats: str | None = None
 
     def to_arguments_json(self) -> str:
         d: dict[str, Any] = {
@@ -323,6 +503,12 @@ class RunBacktestAction(Action):
             "years": self.years,
             "rebalance": self.rebalance,
         }
+        if self.method_summary:
+            d["method_summary"] = self.method_summary
+        if self.assumptions:
+            d["assumptions"] = self.assumptions
+        if self.caveats:
+            d["caveats"] = self.caveats
         if self.months > 0:
             d["months"] = self.months
         return json.dumps(d, ensure_ascii=False)
@@ -340,6 +526,9 @@ class RunBacktestObservation(Observation):
     columns: list = field(default_factory=list)
     rows: list = field(default_factory=list)
     row_count: int = 0
+    method_summary: str | None = None
+    assumptions: str | None = None
+    caveats: str | None = None
 
     def to_text(self) -> str:
         if self.success:
@@ -348,6 +537,12 @@ class RunBacktestObservation(Observation):
                 f"Total return: {self.total_return_pct}%, Excess vs benchmark: {self.excess_return_pct}%p. "
                 f"{self.summary}"
             )
+            if self.method_summary:
+                text += f" method_summary={self.method_summary}"
+            if self.assumptions:
+                text += f" assumptions={self.assumptions}"
+            if self.caveats:
+                text += f" caveats={self.caveats}"
             if self.rows and all(r.get("return_pct", 0) == 0 and r.get("holdings", 0) == 0 for r in self.rows):
                 text += " WARNING: All periods returned 0 holdings — the screening SQL likely matched no stocks. Check the query."
             return text
@@ -361,13 +556,22 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
 
     if not action.screening_sql.strip():
         return RunBacktestObservation(success=False, summary="screening_sql이 비어 있습니다.")
+    if not _explicitly_requests_backtest(conversation):
+        return RunBacktestObservation(
+            success=False,
+            summary=(
+                "Backtest skipped: the latest user turn did not explicitly request a backtest. "
+                "Answer from the current screening/query context instead."
+            ),
+        )
 
     runner = OracleSQLRunner()
+    screening_sql, normalization_notes = _normalize_screening_sql_date_anchors(action.screening_sql, action.universe)
 
     try:
         results = _run_backtest_logic(
             runner=runner,
-            screening_sql=action.screening_sql,
+            screening_sql=screening_sql,
             universe=action.universe,
             years=action.years,
             rebalance=action.rebalance,
@@ -387,7 +591,7 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
                 "user_id": user_id,
                 "session_id": state.get_agent_state("session_id"),
                 "strategy_name": action.strategy_name,
-                "strategy_description": action.screening_sql,
+                "strategy_description": screening_sql,
                 "conditions": [],
                 "universe": action.universe,
                 "rebalance_period": action.rebalance,
@@ -414,6 +618,16 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
         f"{action.rebalance} 리밸런싱. "
         f"과거 수익률이 미래 수익률을 보장하지 않습니다."
     )
+    if normalization_notes:
+        summary += " 가격 기준일은 휴일/비거래일이면 직전 거래일 종가로 자동 보정했습니다."
+
+    method_summary = action.method_summary
+    if normalization_notes:
+        normalization_summary = (
+            "백테스트 도구가 과거 가격 기준일 앵커를 직전 거래일 기준으로 자동 정규화함 "
+            f"({len(normalization_notes)}개 조건)."
+        )
+        method_summary = f"{method_summary.rstrip()}\n{normalization_summary}" if method_summary else normalization_summary
 
     period_rows = results.get("period_returns", [])
     eq_curve = results.get("equity_curve", [])
@@ -445,6 +659,9 @@ def _execute(action: RunBacktestAction, conversation: Any) -> RunBacktestObserva
         columns=display_columns,
         rows=display_rows,
         row_count=len(display_rows),
+        method_summary=method_summary,
+        assumptions=action.assumptions,
+        caveats=action.caveats,
     )
 
 
@@ -464,7 +681,12 @@ class RunBacktestTool(ToolDefinition):
                         "Oracle SQL returning 'stock_id' column. Uses {as_of_date} placeholder "
                         "(engine substitutes YYYY-MM-DD per period). "
                         "ONLY use criteria the user mentioned — NEVER invent conditions. "
-                        "Adapt from SQL already used in this session, replacing dates with TO_DATE('{as_of_date}','YYYY-MM-DD')."
+                        "Adapt from SQL already used in this session, replacing dates with TO_DATE('{as_of_date}','YYYY-MM-DD'). "
+                        "For lookback price anchors such as m1_dt, m6_dt, or m12_dt, use the latest trading day <= anchor date, "
+                        "not the first trading day after the anchor. The tool auto-normalizes obvious "
+                        "price.\"date\" BETWEEN m12_dt AND ref_dt anchor mistakes to same-stock MAX(date <= m12_dt). "
+                        "When deriving global price anchor dates from daily_prices, scope MAX(\"date\") to the requested universe; "
+                        "the tool auto-normalizes unscoped MAX(\"date\") daily_prices anchors."
                     ),
                 },
                 "universe": {
@@ -490,8 +712,27 @@ class RunBacktestTool(ToolDefinition):
                         "Mixed (flow + financial): use quarterly."
                     ),
                 },
+                "method_summary": {
+                    "type": "string",
+                    "description": (
+                        "Human-readable implementation summary for the backtest. "
+                        "State universe, rebalance schedule, screening criteria, date/lag handling, ranking, and portfolio construction. "
+                        "Do not paste SQL."
+                    ),
+                },
+                "assumptions": {
+                    "type": "string",
+                    "description": "User-visible assumptions/defaults used by this backtest, or '없음' when none are material.",
+                },
+                "caveats": {
+                    "type": "string",
+                    "description": (
+                        "User-visible caveats such as omitted filters, approximate data handling, hardcoded periods, "
+                        "or limitations of screening_sql. Use '없음' only when none are material."
+                    ),
+                },
             },
-            "required": ["strategy_name", "screening_sql"],
+            "required": ["strategy_name", "screening_sql", "method_summary", "assumptions", "caveats"],
         }
 
 
@@ -501,7 +742,11 @@ def make_run_backtest_tool() -> RunBacktestTool:
         description=(
             "Run historical backtest with {as_of_date} placeholder in screening SQL. "
             "Only call when user explicitly requests a backtest — for condition/result questions, answer from session context. "
+            "Lookback price anchors are invariant: if an anchor date is a holiday/non-trading day, use the previous trading day. "
+            "The tool automatically normalizes obvious BETWEEN-anchor mistakes for m1/m6/m9/m12/m24/m36 lookback price anchors. "
+            "The tool also normalizes unscoped daily_prices MAX(date) anchors to the requested universe trading calendar. "
             "If some conditions are excluded (e.g. insufficient data), state what was included/excluded and why. "
+            "Always fill method_summary, assumptions, and caveats so the final answer can show what was actually implemented. "
             "Always include: 과거 수익률이 미래 수익률을 보장하지 않습니다."
         ),
         action_type=RunBacktestAction,

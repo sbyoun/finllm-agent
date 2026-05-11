@@ -117,7 +117,11 @@ def run_stream(body: RunRequestModel) -> StreamingResponse:
         thread.start()
 
         while True:
-            item = event_queue.get()
+            try:
+                item = event_queue.get(timeout=15)
+            except queue.Empty:
+                yield f"event: heartbeat\ndata: {json.dumps({'type': 'heartbeat'}, ensure_ascii=False)}\n\n"
+                continue
             if item is None:
                 break
             yield f"event: {item['type']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"

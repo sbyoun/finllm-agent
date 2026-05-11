@@ -30,6 +30,9 @@ class RunSQLAction(Action):
     sql: str = ""
     title: str | None = None
     description: str | None = None
+    method_summary: str | None = None
+    assumptions: str | None = None
+    caveats: str | None = None
     role: str = "final"  # "final" = analysis result for display, "diagnostic" = exploration/schema lookup
 
 
@@ -39,18 +42,30 @@ class RunSQLObservation(Observation):
     rows: list[dict] = field(default_factory=list)
     row_count: int = 0
     role: str = "final"
+    method_summary: str | None = None
+    assumptions: str | None = None
+    caveats: str | None = None
     preview_limit: int = 100
 
     def to_text(self) -> str:
         preview_rows = self.rows[: self.preview_limit]
-        return "\n".join(
+        lines = [
+            f"row_count={self.row_count}",
+            f"columns={self.columns}",
+        ]
+        if self.method_summary:
+            lines.append(f"method_summary={self.method_summary}")
+        if self.assumptions:
+            lines.append(f"assumptions={self.assumptions}")
+        if self.caveats:
+            lines.append(f"caveats={self.caveats}")
+        lines.extend(
             [
-                f"row_count={self.row_count}",
-                f"columns={self.columns}",
                 f"preview_row_count={len(preview_rows)}",
                 f"preview_rows={preview_rows}",
             ]
         )
+        return "\n".join(lines)
 
 
 class RunSQLTool(ToolDefinition):
@@ -61,13 +76,35 @@ class RunSQLTool(ToolDefinition):
                 "sql": {"type": "string", "description": "SQL query to execute"},
                 "title": {"type": "string", "description": "Title for the result dataset"},
                 "description": {"type": "string", "description": "Description of what this query does"},
+                "method_summary": {
+                    "type": "string",
+                    "description": (
+                        "Human-readable implementation summary for final/data queries. "
+                        "State the universe, as-of/date basis, factor/filter definitions, ranking/sorting direction, "
+                        "and any important joins/date lags actually implemented by this SQL. Do not paste SQL."
+                    ),
+                },
+                "assumptions": {
+                    "type": "string",
+                    "description": (
+                        "User-visible assumptions made by this SQL, especially defaults not explicitly specified by the user. "
+                        "Use '없음' only when there are no material assumptions."
+                    ),
+                },
+                "caveats": {
+                    "type": "string",
+                    "description": (
+                        "User-visible caveats and excluded conditions, such as missing 거래정지/관리종목 filters, "
+                        "hardcoded periods, approximate metrics, or data limitations. Use '없음' only when none are material."
+                    ),
+                },
                 "role": {
                     "type": "string",
                     "enum": ["final", "diagnostic"],
                     "description": "Default to 'final'. Use 'diagnostic' ONLY for schema/metadata lookups (e.g., listing tables, finding column names, resolving stock IDs). Any query that returns actual market data, financials, prices, or rankings MUST use 'final'.",
                 },
             },
-            "required": ["sql"],
+            "required": ["sql", "method_summary", "assumptions", "caveats"],
         }
 
 
@@ -87,6 +124,9 @@ def make_run_sql_tool(runner: SQLRunner) -> RunSQLTool:
             rows=rows,
             row_count=len(rows),
             role=action.role,
+            method_summary=action.method_summary,
+            assumptions=action.assumptions,
+            caveats=action.caveats,
         )
 
     return RunSQLTool(
@@ -94,9 +134,14 @@ def make_run_sql_tool(runner: SQLRunner) -> RunSQLTool:
         description=(
             "Execute SQL query. "
             "NEVER use SYSDATE/CURRENT_DATE/today's date — use MAX(\"date\") subquery instead. "
+            "Oracle: never nest analytic/window functions (`... OVER (...)`, e.g. LAG/ROW_NUMBER) inside aggregates "
+            "like STDDEV/AVG/SUM; compute window values in an inner CTE, aggregate in an outer CTE. "
+            "For factor rankings with DESC, always use NULLS LAST or filter NULL factors before ranking. "
+            "If summing PERCENT_RANK over DESC factors, sort the summed score ASC unless using 1-PERCENT_RANK. "
             "0 rows → retry with MAX(\"date\") or broader filters. "
             "role='final'(default) for data queries; role='diagnostic' ONLY for schema lookups. "
-            "State actual date in answer (e.g. '4월 8일 기준'), not '오늘'."
+            "For every final/data query, fill method_summary, assumptions, and caveats so the final answer can show "
+            "what was actually implemented. State actual date in answer (e.g. '4월 8일 기준'), not '오늘'."
         ),
         action_type=RunSQLAction,
         observation_type=RunSQLObservation,

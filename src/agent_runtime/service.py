@@ -28,7 +28,7 @@ from agent_runtime.tool.portfolio import make_get_portfolio_tool
 from agent_runtime.tool.sql import RunSQLAction, RunSQLObservation, make_run_sql_tool
 from agent_runtime.tool.sql.oracle import OracleSQLRunner
 from agent_runtime.tool.jobs.register_job import make_register_job_tool
-from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation, make_run_backtest_tool
+from agent_runtime.tool.backtest.run_backtest import RunBacktestAction, RunBacktestObservation, make_run_backtest_tool
 from agent_runtime.tool.forward_test import (
     make_create_forward_test_tool,
     make_execute_forward_trades_tool,
@@ -402,9 +402,14 @@ def _map_runtime_event(event: object) -> dict[str, Any] | None:
             skill_name = getattr(event.action, "skill_name", None)
             if isinstance(skill_name, str) and skill_name.strip():
                 payload["skillName"] = skill_name
+        tool_message = (
+            "백테스트를 실행하고 있습니다. 완료까지 시간이 걸릴 수 있습니다."
+            if event.tool_name == "run_backtest"
+            else f"Tool: {event.tool_name}"
+        )
         return {
             "type": "tool",
-            "message": f"Tool: {event.tool_name}",
+            "message": tool_message,
             "payload": payload,
         }
     if isinstance(event, ObservationEvent):
@@ -449,6 +454,66 @@ def _build_dataset_from_sql(action: RunSQLAction, observation: RunSQLObservation
     )
 
 
+def _is_none_text(value: str | None) -> bool:
+    if not value:
+        return True
+    normalized = value.strip().lower()
+    return normalized in {"없음", "none", "n/a", "-", "no material assumptions", "no material caveats"}
+
+
+def _format_execution_notes(action: RunSQLAction | RunBacktestAction | None) -> str:
+    if action is None:
+        return ""
+
+    method_summary = getattr(action, "method_summary", None)
+    assumptions = getattr(action, "assumptions", None)
+    caveats = getattr(action, "caveats", None)
+
+    if not method_summary and not assumptions and not caveats:
+        return (
+            "### 실제 실행 기준\n"
+            "- 도구 호출에 실행 기준 메타데이터가 누락되었습니다. 결과 해석 시 쿼리 구현을 별도로 확인해야 합니다.\n\n"
+            "### 유의사항\n"
+            "- 실행은 완료됐지만, 조건 해석과 계산 기준이 최종 답변에 구조화되어 전달되지 않았습니다."
+        )
+
+    lines = ["### 실제 실행 기준"]
+    if method_summary:
+        lines.append(f"- {method_summary.strip()}")
+    else:
+        lines.append("- 실행 기준 메타데이터가 누락되었습니다.")
+
+    lines.append("")
+    lines.append("### 가정 및 유의사항")
+    if not _is_none_text(assumptions):
+        lines.append(f"- 가정: {assumptions.strip()}")
+    if not _is_none_text(caveats):
+        lines.append(f"- 유의사항: {caveats.strip()}")
+    if _is_none_text(assumptions) and _is_none_text(caveats):
+        lines.append("- 별도 가정 또는 유의사항이 명시되지 않았습니다.")
+    return "\n".join(lines)
+
+
+def _append_execution_notes(final_message: str, execution_notes: str) -> str:
+    if not execution_notes:
+        return final_message
+    if "### 실제 실행 기준" in final_message:
+        return final_message
+    if not final_message.strip():
+        return execution_notes
+    return final_message.rstrip() + "\n\n" + execution_notes
+
+
+_BACKTEST_REQUEST_RE = re.compile(
+    r"(백테스트|backtest|과거\s*성과|성과\s*검증|누적\s*수익|mdd|cagr|샤프|sharpe|시뮬레이션)",
+    re.IGNORECASE,
+)
+
+
+def _explicitly_requests_backtest(text: str) -> bool:
+    return bool(_BACKTEST_REQUEST_RE.search(text or ""))
+
+
 def _build_result(
     conversation: LocalConversation,
     *,
@@ -471,6 +536,7 @@ def _build_result(
     error_count = 0
     condensation_count = 0
     assistant_message_count = 0
+    current_question = ""
 
     pending_sql_action: RunSQLAction | None = None
     for event in run_events:
@@ -488,9 +554,7 @@ def _build_result(
         elif isinstance(event, ObservationEvent):
             if isinstance(event.observation, RunSQLObservation):
                 obs = event.observation
-                is_lookup = set(obs.columns) <= {"id", "ticker", "name", "stock_id", "sector_group", "sector"}
-                effective_role = "diagnostic" if is_lookup else obs.role
-                if effective_role == "final":
+                if obs.role == "final":
                     last_sql_observation = obs
                     last_sql_action = pending_sql_action
                     if pending_sql_action is not None:
@@ -506,22 +570,42 @@ def _build_result(
         elif isinstance(event, MessageEvent) and event.role == "assistant":
             assistant_message_count += 1
             final_message = _sanitize_assistant_message(event.content)
+        elif isinstance(event, MessageEvent) and event.role == "user":
+            current_question = event.content
 
     dataset = None
     datasets: list[RuntimeAnalysisDataset] = []
     sql = None
     sql_scripts: list[str] = []
     tool_request = None
+    execution_notes = ""
     mode = "answer-only"
 
     # Check for backtest observation
     last_backtest_obs: RunBacktestObservation | None = None
+    last_backtest_action: RunBacktestAction | None = None
+    pending_backtest_action: RunBacktestAction | None = None
     for event in run_events:
+        if isinstance(event, ActionEvent) and isinstance(event.action, RunBacktestAction):
+            pending_backtest_action = event.action
         if isinstance(event, ObservationEvent) and isinstance(event.observation, RunBacktestObservation):
             if event.observation.success:
                 last_backtest_obs = event.observation
+                last_backtest_action = pending_backtest_action
 
-    if last_backtest_obs:
+    successful_sql_results = [
+        (action, observation)
+        for action, observation in final_sql_results
+        if observation.row_count > 0
+    ]
+    display_sql_results = successful_sql_results or final_sql_results
+    prefer_backtest_result = (
+        last_backtest_obs is not None
+        and (_explicitly_requests_backtest(current_question) or not display_sql_results)
+    )
+
+    if prefer_backtest_result and last_backtest_obs:
+        execution_notes = _format_execution_notes(last_backtest_action)
         columns = [
             RuntimeDataColumn(key="period", label="기간"),
             RuntimeDataColumn(key="return_pct", label="수익률(%)"),
@@ -551,25 +635,23 @@ def _build_result(
             ),
         )
     else:
-        successful_sql_results = [
-            (action, observation)
-            for action, observation in final_sql_results
-            if observation.row_count > 0
-        ]
-        if successful_sql_results:
+        if display_sql_results:
+            if last_backtest_obs is not None:
+                execution_log.append("result-builder:prefer-sql-over-implicit-backtest")
             datasets = [
                 _build_dataset_from_sql(action, observation)
-                for action, observation in successful_sql_results
+                for action, observation in display_sql_results
             ]
-            sql_scripts = [action.sql for action, _ in successful_sql_results]
-            last_successful_sql_action, last_successful_sql_observation = successful_sql_results[-1]
-            dataset = _build_dataset_from_sql(last_successful_sql_action, last_successful_sql_observation)
-            sql = last_successful_sql_action.sql
+            sql_scripts = [action.sql for action, _ in display_sql_results]
+            last_display_sql_action, last_display_sql_observation = display_sql_results[-1]
+            dataset = _build_dataset_from_sql(last_display_sql_action, last_display_sql_observation)
+            sql = last_display_sql_action.sql
             mode = "tool-result"
             final_message = _strip_markdown_tables(final_message)
+            execution_notes = _format_execution_notes(last_display_sql_action)
             tool_request = RuntimeToolRequest(
                 kind="sql",
-                sql=last_successful_sql_action.sql,
+                sql=last_display_sql_action.sql,
                 reason="Agent completed after tool loop",
                 display=RuntimeDisplaySpec(
                     type="table",
@@ -609,6 +691,9 @@ def _build_result(
         clarification_question = "답변을 완성하지 못했습니다. 같은 질문을 다시 시도하거나 조건을 조금 더 구체적으로 알려 주세요."
         final_message = "답변을 완성하지 못했습니다. 다시 시도해 주세요."
         execution_log.append("fallback:empty-final-message")
+
+    if mode == "tool-result":
+        final_message = _append_execution_notes(final_message, execution_notes)
 
     decision = RuntimePlannerDecision(
         mode=mode,
@@ -732,8 +817,23 @@ def run_agent_request(
 
     started = time.perf_counter()
     streamed_events: list[dict[str, Any]] = []
-    _emit(on_event, _status_event("분석을 시작합니다."))
-    streamed_events.append(_status_event("분석을 시작합니다."))
+    immediately_streamed_event_ids: set[str] = set()
+
+    def emit_runtime_event(event: object) -> None:
+        mapped = _map_runtime_event(event)
+        if not mapped:
+            return
+        event_id = getattr(event, "id", None)
+        if isinstance(event_id, str):
+            immediately_streamed_event_ids.add(event_id)
+        _emit(on_event, mapped)
+        streamed_events.append(mapped)
+
+    conversation.event_callback = emit_runtime_event
+
+    start_event = _status_event("분석을 시작합니다.")
+    _emit(on_event, start_event)
+    streamed_events.append(start_event)
     seen_events = run_start_index
 
     if conversation.state.execution_status in (
@@ -762,6 +862,9 @@ def run_agent_request(
 
         events = list(conversation.state.event_log)
         for event in events[seen_events:]:
+            event_id = getattr(event, "id", None)
+            if isinstance(event_id, str) and event_id in immediately_streamed_event_ids:
+                continue
             mapped = _map_runtime_event(event)
             if mapped:
                 _emit(on_event, mapped)
