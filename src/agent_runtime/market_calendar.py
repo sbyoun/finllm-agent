@@ -10,6 +10,7 @@ from typing import Any
 import requests
 
 _KST = timezone(timedelta(hours=9))
+_KR_HOLIDAY_MAX_PAGES = 5
 
 _KR_HOLIDAY_CACHE: dict[str, dict[str, bool]] = {}  # month_key("YYYYMM") -> { "YYYYMMDD": is_open }
 _KR_LOCK = threading.Lock()
@@ -27,8 +28,19 @@ def _kis_client() -> Any:
     return SimpleKI(settings.KIS_KEYFILE_PATH)
 
 
+def _extract_continuation(payload: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(payload.get("ctx_area_fk") or payload.get("CTX_AREA_FK") or "").strip(),
+        str(payload.get("ctx_area_nk") or payload.get("CTX_AREA_NK") or "").strip(),
+    )
+
+
 def _fetch_kr_holiday_month(month_key: str) -> dict[str, bool]:
-    """KIS chk-holiday(CTCA0903R)를 직접 호출 — month_key=YYYYMM 기준 한 달치를 한 번에."""
+    """KIS chk-holiday(CTCA0903R)를 직접 호출.
+
+    KIS는 한 달 데이터도 24행 단위로 pagination 할 수 있다. 첫 페이지만 읽으면
+    25일 이후 휴장일을 캐시하지 못하고 평일 fallback으로 오판할 수 있다.
+    """
     client = _kis_client()
     bass_dt = f"{month_key}01"
     url = f"{client.URL_BASE}/uapi/domestic-stock/v1/quotations/chk-holiday"
@@ -41,17 +53,37 @@ def _fetch_kr_holiday_month(month_key: str) -> dict[str, bool]:
         "tr_id": "CTCA0903R",
     }
     params = {"BASS_DT": bass_dt, "CTX_AREA_NK": "", "CTX_AREA_FK": ""}
-    res = requests.get(url, headers=headers, params=params, timeout=10)
-    res.raise_for_status()
-    payload = res.json()
-    rows = payload.get("output", []) or []
     result: dict[str, bool] = {}
-    for row in rows:
-        bass = row.get("bass_dt") or row.get("BASS_DT")
-        opnd_yn = (row.get("opnd_yn") or row.get("OPND_YN") or "").upper()
-        if not bass:
-            continue
-        result[bass] = opnd_yn == "Y"
+
+    for _ in range(_KR_HOLIDAY_MAX_PAGES):
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        res.raise_for_status()
+        payload = res.json()
+        rows = payload.get("output", []) or []
+
+        for row in rows:
+            bass = row.get("bass_dt") or row.get("BASS_DT")
+            opnd_yn = (row.get("opnd_yn") or row.get("OPND_YN") or "").upper()
+            if not bass:
+                continue
+            if str(bass).startswith(month_key):
+                result[str(bass)] = opnd_yn == "Y"
+
+        tr_cont = str(res.headers.get("tr_cont") or "").strip()
+        if tr_cont not in {"M", "F"}:
+            break
+
+        row_dates = [str(row.get("bass_dt") or row.get("BASS_DT") or "") for row in rows]
+        if result and row_dates and all(row_date[:6] > month_key for row_date in row_dates if row_date):
+            break
+
+        ctx_area_fk, ctx_area_nk = _extract_continuation(payload)
+        if not ctx_area_fk and not ctx_area_nk:
+            break
+        headers["tr_cont"] = "N"
+        params["CTX_AREA_FK"] = ctx_area_fk
+        params["CTX_AREA_NK"] = ctx_area_nk
+
     return result
 
 
