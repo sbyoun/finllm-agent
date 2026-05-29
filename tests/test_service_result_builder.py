@@ -78,6 +78,29 @@ class ServiceResultBuilderTest(unittest.TestCase):
         self.assertEqual(result.sqlScripts, ["select name, ticker, current_price from stocks where price <= 10000"])
         self.assertNotIn("fallback:no-final-sql-hallucination-guard", result.executionLog)
 
+    def test_build_result_keeps_dataset_when_iteration_limit_errors(self) -> None:
+        conversation = LocalConversation(
+            agent=None,  # type: ignore[arg-type]
+            state=ConversationState(execution_status=ConversationExecutionStatus.ERROR),
+        )
+        run_events: list[object] = [
+            *_sql_events(
+                call_id="partial",
+                sql="select ticker, name, trading_date from surge_candidates",
+                title="거래대금 급증 종목",
+                rows=[{"ticker": "011230", "name": "삼화전자", "trading_date": "2026-05-22"}],
+            ),
+        ]
+
+        result = _build_result(conversation, elapsed_ms=1, loop_count=25, run_events=run_events)
+
+        self.assertEqual(result.decision.mode, "tool-result")
+        self.assertEqual(result.decision.assistantMessage, "데이터 조회 결과를 정리했습니다. 우측 데이터 패널에서 확인해 주세요.")
+        self.assertIsNone(result.decision.clarificationQuestion)
+        self.assertIsNotNone(result.dataset)
+        self.assertEqual(result.dataset.rows[0]["ticker"], "011230")
+        self.assertIn("fallback:partial-sql-result-after-error", result.executionLog)
+
     def test_last_successful_sql_is_not_overwritten_by_empty_sql(self) -> None:
         agent = Agent(llm=None)  # type: ignore[arg-type]
         conversation = LocalConversation(

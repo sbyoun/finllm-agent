@@ -95,6 +95,7 @@ def make_run_sql_tool(runner: SQLRunner) -> RunSQLTool:
             "Execute SQL query. "
             "NEVER use SYSDATE/CURRENT_DATE/today's date — use MAX(\"date\") subquery instead. "
             "0 rows → retry with MAX(\"date\") or broader filters. "
+            "For date-specific questions, include the actual data date/trading_date in the result and state if it differs from the requested date. "
             "role='final'(default) for data queries; role='diagnostic' ONLY for schema lookups. "
             "State actual date in answer (e.g. '4월 8일 기준'), not '오늘'."
         ),

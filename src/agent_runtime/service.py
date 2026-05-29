@@ -578,7 +578,7 @@ def _build_result(
                 ),
             )
 
-    if conversation.state.execution_status == ConversationExecutionStatus.ERROR and not final_message:
+    if conversation.state.execution_status == ConversationExecutionStatus.ERROR and not final_message and not dataset:
         mode = "clarification"
         clarification_question = "질문을 처리하는 중 오류가 발생했습니다. 조건이나 대상을 조금 더 구체적으로 알려 주세요."
         final_message = "질문을 처리하는 중 오류가 발생했습니다."
@@ -604,6 +604,8 @@ def _build_result(
 
     if not final_message and dataset:
         final_message = "데이터 조회 결과를 정리했습니다. 우측 데이터 패널에서 확인해 주세요."
+        if conversation.state.execution_status == ConversationExecutionStatus.ERROR:
+            execution_log.append("fallback:partial-sql-result-after-error")
     elif not final_message:
         mode = "clarification"
         clarification_question = "답변을 완성하지 못했습니다. 같은 질문을 다시 시도하거나 조건을 조금 더 구체적으로 알려 주세요."
