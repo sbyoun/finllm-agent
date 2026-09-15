@@ -25,6 +25,7 @@ from agent_runtime.llm import RuntimeLlmConfig, create_default_llm_client, creat
 from agent_runtime.prompt import DEFAULT_SKILL_FILES, DEFAULT_SKILL_FILES_COMPACT, build_system_prompt
 from agent_runtime.tool.news import SearchNewsObservation, make_search_news_tool
 from agent_runtime.tool.portfolio import make_get_portfolio_tool
+from agent_runtime.tool.research import make_search_research_tool
 from agent_runtime.tool.sql import RunSQLAction, RunSQLObservation, make_run_sql_tool
 from agent_runtime.tool.sql.oracle import OracleSQLRunner
 from agent_runtime.tool.jobs.register_job import make_register_job_tool
@@ -264,6 +265,7 @@ def _build_tools(*, repo_root: Path):
     return [
         make_get_portfolio_tool(),
         make_search_news_tool(),
+        make_search_research_tool(),
         make_run_sql_tool(OracleSQLRunner()),
         make_register_job_tool(),
         make_run_backtest_tool(),
