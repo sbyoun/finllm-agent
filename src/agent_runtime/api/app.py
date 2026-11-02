@@ -36,6 +36,10 @@ class RunRequestModel(BaseModel):
     stateSnapshot: dict[str, Any] = Field(default_factory=dict)
     llmConfig: LlmConfigModel | None = None
     maxIterations: int = 25
+    # 원가 측정 꼬리표 — source: chat|telegram|scheduler, billing: managed|byok
+    usageSource: str | None = None
+    billing: str | None = None
+    planCode: str | None = None
 
 
 def _to_runtime_request(body: RunRequestModel) -> RuntimeAgentRequest:
@@ -53,6 +57,9 @@ def _to_runtime_request(body: RunRequestModel) -> RuntimeAgentRequest:
         if body.llmConfig
         else None,
         max_iterations=body.maxIterations,
+        usage_source=body.usageSource,
+        billing=body.billing,
+        plan_code=body.planCode,
     )
 
 
@@ -141,6 +148,7 @@ def run_stream(body: RunRequestModel) -> StreamingResponse:
             "elapsedMs": result.elapsedMs,
             "status": result.status,
             "stateSnapshot": result.stateSnapshot,
+            "llmUsage": result.llmUsage,
             "tracePath": result.tracePath,
         }
         yield f"event: result\ndata: {json.dumps(final_result, ensure_ascii=False)}\n\n"
