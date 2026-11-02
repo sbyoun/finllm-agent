@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -21,7 +22,8 @@ from agent_runtime.event.condensation import CondensationEvent
 from agent_runtime.event.message import MessageEvent
 from agent_runtime.event.observation import AgentErrorEvent, ObservationEvent
 from agent_runtime.event.state_update import ConversationStateUpdateEvent
-from agent_runtime.llm import RuntimeLlmConfig, create_default_llm_client, create_llm_client
+from agent_runtime.llm import RuntimeLlmConfig, create_default_llm_client, create_llm_client, infer_provider
+from agent_runtime.llm.metering import MeteredLLMClient, build_usage_row, record_usage
 from agent_runtime.prompt import DEFAULT_SKILL_FILES, DEFAULT_SKILL_FILES_COMPACT, build_system_prompt
 from agent_runtime.tool.news import SearchNewsObservation, make_search_news_tool
 from agent_runtime.tool.portfolio import make_get_portfolio_tool
@@ -183,6 +185,10 @@ class RuntimeAgentRequest:
     state_snapshot: dict[str, Any] = field(default_factory=dict)
     llm_config: RuntimeLlmConfig | None = None
     max_iterations: int = 8
+    # 원가 측정용 꼬리표(백엔드가 채움). source: chat|telegram|scheduler, billing: managed|byok
+    usage_source: str | None = None
+    billing: str | None = None
+    plan_code: str | None = None
 
 
 @dataclass(slots=True)
@@ -199,6 +205,7 @@ class RuntimeAgentResult:
     elapsedMs: int
     status: str
     stateSnapshot: dict[str, Any] = field(default_factory=dict)
+    llmUsage: dict[str, Any] | None = None
     tracePath: str | None = None
 
 
@@ -277,7 +284,13 @@ def _build_tools(*, repo_root: Path):
 
 def _build_agent(*, repo_root: Path, llm_config: RuntimeLlmConfig | None) -> Agent:
     tools = _build_tools(repo_root=repo_root)
-    llm = create_llm_client(llm_config) if llm_config else create_default_llm_client()
+    raw_llm = create_llm_client(llm_config) if llm_config else create_default_llm_client()
+    resolved_model = llm_config.model if llm_config else (os.getenv("MANAGED_GEMINI_MODEL", "").strip() or "default")
+    llm = MeteredLLMClient(
+        raw_llm,
+        provider=infer_provider(model=resolved_model, base_url=llm_config.base_url if llm_config else None),
+        model=resolved_model,
+    )
     model_name = (llm_config.model if llm_config else "").lower()
     is_opus = "opus" in model_name
     if is_opus:
@@ -702,6 +715,7 @@ def _write_trace(
             "elapsedMs": result.elapsedMs,
             "status": result.status,
             "stateSnapshot": result.stateSnapshot,
+            "llmUsage": result.llmUsage,
         },
         "agent_state": conversation.state.agent_state,
         "streamed_events": streamed_events,
@@ -722,6 +736,43 @@ def run_agent_request(
     root = Path(repo_root)
     run_id = str(uuid4())
     agent = _build_agent(repo_root=root, llm_config=request.llm_config)
+    started = time.perf_counter()
+    outcome: dict[str, Any] = {"status": "error", "loop_count": None}
+    try:
+        result = _run_agent_loop(request, agent=agent, root=root, run_id=run_id, on_event=on_event, started=started, outcome=outcome)
+        outcome["status"] = result.status
+        return result
+    finally:
+        # 실패·타임아웃이어도 이미 쓴 토큰은 남긴다.
+        metered = agent.llm if isinstance(agent.llm, MeteredLLMClient) else None
+        if metered is not None:
+            record_usage(
+                build_usage_row(
+                    run_id=run_id,
+                    summary=metered.summary(),
+                    user_id=request.user_id,
+                    session_id=request.session_id,
+                    source=request.usage_source,
+                    billing=request.billing or ("managed" if request.llm_config is None else None),
+                    plan_code=request.plan_code,
+                    status=str(outcome["status"]),
+                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                    loop_count=outcome["loop_count"],
+                ),
+                repo_root=root,
+            )
+
+
+def _run_agent_loop(
+    request: RuntimeAgentRequest,
+    *,
+    agent: Agent,
+    root: Path,
+    run_id: str,
+    on_event: EventCallback | None,
+    started: float,
+    outcome: dict[str, Any],
+) -> RuntimeAgentResult:
     conversation = create_conversation(agent, max_iterations=request.max_iterations)
     if request.state_snapshot:
         conversation.state.agent_state.update(request.state_snapshot)
@@ -734,7 +785,6 @@ def run_agent_request(
     conversation.send_message(request.question)
     run_start_index = len(conversation.state.event_log) - 1
 
-    started = time.perf_counter()
     streamed_events: list[dict[str, Any]] = []
     _emit(on_event, _status_event("분석을 시작합니다."))
     streamed_events.append(_status_event("분석을 시작합니다."))
@@ -773,6 +823,7 @@ def run_agent_request(
         seen_events = len(events)
 
         iteration += 1
+        outcome["loop_count"] = iteration
         if iteration >= conversation.state.max_iterations:
             conversation.state.execution_status = ConversationExecutionStatus.ERROR
             _emit(
@@ -798,6 +849,8 @@ def run_agent_request(
         run_events=list(conversation.state.event_log)[run_start_index:],
     )
     result.runId = run_id
+    if isinstance(agent.llm, MeteredLLMClient):
+        result.llmUsage = agent.llm.summary()
     result.tracePath = _write_trace(
         repo_root=root,
         run_id=run_id,

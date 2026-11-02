@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from agent_runtime.env import require_env
-from agent_runtime.llm.client import LLMResponse, LLMToolCall, Message
+from agent_runtime.llm.client import LLMResponse, LLMToolCall, LLMUsage, Message
 
 
 def _message_to_gemini_parts(message: dict) -> list[dict[str, Any]]:
@@ -127,12 +127,22 @@ class GeminiClient:
         if not content and not tool_calls:
             logging.warning("Gemini empty response: finishReason=%s, candidate=%s", finish_reason, json.dumps(candidate, ensure_ascii=False)[:500])
 
+        meta = data.get("usageMetadata") or {}
+        usage = LLMUsage(
+            input_tokens=int(meta.get("promptTokenCount") or 0) + int(meta.get("toolUsePromptTokenCount") or 0),
+            output_tokens=int(meta.get("candidatesTokenCount") or 0),
+            thinking_tokens=int(meta.get("thoughtsTokenCount") or 0),
+            cached_tokens=int(meta.get("cachedContentTokenCount") or 0),
+            model_version=data.get("modelVersion") or model,
+        )
+
         return LLMResponse(
             message=Message(
                 role="assistant",
                 content=content,
                 tool_calls=tool_calls,
-            )
+            ),
+            usage=usage,
         )
 
     def _request_with_retry(self, request: Request) -> dict[str, Any]:

@@ -7,7 +7,7 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from agent_runtime.llm.client import LLMResponse, LLMToolCall, Message
+from agent_runtime.llm.client import LLMResponse, LLMToolCall, LLMUsage, Message
 
 _LOGGER = logging.getLogger("agent_runtime.llm.anthropic")
 
@@ -183,10 +183,20 @@ class AnthropicClient:
                     )
                 )
 
+        cache_read = int(usage.get("cache_read_input_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or 0)
         return LLMResponse(
             message=Message(
                 role="assistant",
                 content="\n".join(part for part in text_parts if part).strip(),
                 tool_calls=tool_calls,
-            )
+            ),
+            # Anthropic 의 input_tokens 는 캐시 몫을 뺀 값이라 더해서 '입력 전체'로 맞춘다.
+            usage=LLMUsage(
+                input_tokens=int(usage.get("input_tokens") or 0) + cache_read + cache_write,
+                output_tokens=int(usage.get("output_tokens") or 0),
+                cached_tokens=cache_read,
+                cache_write_tokens=cache_write,
+                model_version=data.get("model") or self.model,
+            ),
         )

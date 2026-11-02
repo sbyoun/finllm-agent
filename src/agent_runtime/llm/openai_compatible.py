@@ -6,7 +6,7 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from agent_runtime.llm.client import LLMResponse, LLMToolCall, Message
+from agent_runtime.llm.client import LLMResponse, LLMToolCall, LLMUsage, Message
 
 
 def _chat_completions_url(base_url: str) -> str:
@@ -67,10 +67,22 @@ class OpenAICompatibleClient:
             if ((tool_call.get("function") or {}).get("name"))
         ]
 
+        raw_usage = data.get("usage") or {}
+        reasoning = int(((raw_usage.get("completion_tokens_details") or {}).get("reasoning_tokens")) or 0)
+        usage = LLMUsage(
+            input_tokens=int(raw_usage.get("prompt_tokens") or 0),
+            # completion_tokens 는 reasoning 을 포함한다 → 보이는 출력만 남긴다.
+            output_tokens=max(int(raw_usage.get("completion_tokens") or 0) - reasoning, 0),
+            thinking_tokens=reasoning,
+            cached_tokens=int(((raw_usage.get("prompt_tokens_details") or {}).get("cached_tokens")) or 0),
+            model_version=data.get("model") or self.model,
+        )
+
         return LLMResponse(
             message=Message(
                 role="assistant",
                 content=content if isinstance(content, str) else json.dumps(content, ensure_ascii=False),
                 tool_calls=tool_calls,
-            )
+            ),
+            usage=usage,
         )
