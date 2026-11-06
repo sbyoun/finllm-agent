@@ -307,7 +307,7 @@ def _build_agent(*, repo_root: Path, llm_config: RuntimeLlmConfig | None) -> Age
         )
     else:
         condenser = LLMSummarizingCondenser(llm=llm, max_size=24, keep_first=2)
-    return Agent(
+    agent = Agent(
         llm=llm,
         tools=tools,
         system_prompt=build_system_prompt(tools=tools, repo_root=repo_root),
@@ -316,6 +316,14 @@ def _build_agent(*, repo_root: Path, llm_config: RuntimeLlmConfig | None) -> Age
         skill_files_compact=DEFAULT_SKILL_FILES_COMPACT,
         condenser=condenser,
     )
+    # Gemini: 스키마 안내(전체판)를 시스템 프롬프트 뒤에 붙여 고정 부분으로 — 명시 캐시에 함께 올라간다.
+    # 캐시로 읽으면 입력 단가 1/10 이라 compact 판으로 줄일 이유가 없다. 다른 공급자는 기존대로 매 호출 끝에.
+    if llm.provider == "gemini":
+        schema_text = agent.resolved_dynamic_context(compact=False)
+        if schema_text:
+            agent.system_prompt = f"{agent.system_prompt}\n\n{schema_text}"
+            agent.schema_in_system = True
+    return agent
 
 
 MAX_HISTORY_CHARS = 40_000  # ~10K tokens, well within context limits
