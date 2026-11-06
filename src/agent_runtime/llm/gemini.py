@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from agent_runtime.env import require_env
+from agent_runtime.llm import gemini_cache
 from agent_runtime.llm.client import LLMResponse, LLMToolCall, LLMUsage, Message
 
 
@@ -91,14 +92,27 @@ class GeminiClient:
             payload["tools"] = [{"functionDeclarations": [_tool_to_gemini_function(tool) for tool in tools]}]
 
         query = urlencode({"key": api_key})
-        request = Request(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?{query}",
-            headers={"Content-Type": "application/json"},
-            data=json.dumps(payload).encode("utf-8"),
-            method="POST",
-        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?{query}"
 
-        data = self._request_with_retry(request)
+        def build(body: dict[str, Any]) -> Request:
+            return Request(url, headers={"Content-Type": "application/json"}, data=json.dumps(body).encode("utf-8"), method="POST")
+
+        # 시스템+툴이 있는 요청은 명시 캐시로(gemini_cache.py). 캐시 쪽 오류면 캐시 없이 한 번 더 보낸다
+        cache_name = None
+        if system_message and tools and gemini_cache.enabled_for(api_key):
+            cache_name = gemini_cache.get_or_create(
+                api_key=api_key, model=model,
+                system_instruction=payload["system_instruction"], tools=payload["tools"],
+            )
+        if cache_name:
+            try:
+                data = self._request_with_retry(build({"cachedContent": cache_name, "contents": contents}))
+            except RuntimeError as exc:
+                logging.warning("gemini cached request failed, retrying without cache: %s", str(exc)[:200])
+                gemini_cache.forget(cache_name)
+                data = self._request_with_retry(build(payload))
+        else:
+            data = self._request_with_retry(build(payload))
 
         candidates = data.get("candidates") or []
         if not candidates:

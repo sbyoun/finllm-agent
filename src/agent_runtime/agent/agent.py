@@ -12,6 +12,7 @@ from agent_runtime.event.action import ActionEvent
 from agent_runtime.event.message import MessageEvent, SystemPromptEvent
 from agent_runtime.event.observation import AgentErrorEvent, ObservationEvent
 from agent_runtime.llm.client import LLMToolCall, Message
+from agent_runtime.prompt.builder import current_time_context
 from agent_runtime.tool.news.search_news import SearchNewsAction, SearchNewsObservation
 from agent_runtime.tool.portfolio.get_portfolio import GetPortfolioObservation
 from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation
@@ -359,14 +360,15 @@ class Agent(AgentBase):
         agent_state = conversation.state.agent_state
         has_tool_history = bool(agent_state.get("recent_tool_history"))
         use_compact = has_tool_history and bool(self.skill_files_compact)
-        schema_ctx = self.resolved_dynamic_context(compact=use_compact) or ""
+        schema_ctx = "" if self.schema_in_system else (self.resolved_dynamic_context(compact=use_compact) or "")
         state_ctx = self._state_context(conversation) or ""
 
         # system은 static self.system_prompt만 — prompt cache prefix 매칭용.
         # 동적 컨텍스트(schema/state)는 맨 끝 user 메시지로 분리해서 <context> 태그로 감싼다.
         # 맨 끝에 둬야 앞쪽 message history가 전부 static prefix가 되어 캐시 hit 가능.
         messages.insert(0, {"role": "system", "content": self.system_prompt})
-        dynamic_ctx = "\n\n".join(p for p in [schema_ctx, state_ctx] if p)
+        # 현재 시각은 시스템 프롬프트가 아니라 여기(맨 끝)에 — 시스템 프롬프트를 캐시 가능한 고정 접두로 유지
+        dynamic_ctx = "\n\n".join(p for p in [schema_ctx, state_ctx, current_time_context()] if p)
         if dynamic_ctx:
             messages.append(
                 {
