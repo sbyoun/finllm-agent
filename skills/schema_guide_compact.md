@@ -15,15 +15,15 @@ benchmark_daily_prices: symbol|"date"|close (KS11/SPY/QQQ)
 financial_statements: stock_id|account_id|year|quarter|value (long table, account_id는 목록에서만)
 financial_accounts: id|account_name|account_type
 kr_investor_trade_daily: stock_id|"date"|foreign/personal/institution_net_value|close (*_value=백만원)
-kr_program_trade_daily: stock_id|"date"|program_net_value|close (*_value=백만원)
+kr_program_trade_daily: stock_id|"date"|program_net_value|close (*_value=원, 백만원 아님 — 억원은 /1e8)
 kr_market_investor_daily: market_code|"date"|foreign/personal/institution_net_value (*_value=백만원)
 kr_market_program_daily: market_code|"date"|whole/arbitrage/nonarbitrage_net_value (*_value=백만원)
 **수급 날짜 규칙**: 수급 테이블(kr_investor/program/market_*)은 T+1 지연. SYSDATE/CURRENT_DATE/오늘·어제 날짜 하드코딩 금지. 반드시 `(SELECT MAX("date") FROM 해당테이블)` 서브쿼리로 최신 날짜 기준 조회.
 **벤치마크 날짜 규칙**: daily_prices와 benchmark_daily_prices의 거래일이 다를 수 있다. 초과수익 등 벤치마크 비교 시 기준 날짜(시작/종료)를 반드시 benchmark_daily_prices에서 추출하거나, 정확한 날짜가 없으면 `<=`/`>=`로 가장 가까운 날짜를 사용할 것. 두 테이블을 exact date JOIN하면 NULL 발생.
 stock_sectors: stock_id|sector|sector_group
 kr_loan_daily: stock_id|"date"|remaining_qty|remaining_amount(백만원)
-kr_short_sale_daily: stock_id|"date"|short_sale_qty/value|short_sale_volume_ratio (*_value=백만원)
-kr_stock_snapshots: ticker|"date"|market_cap(백만원)|listed_shares|kospi200_sector (join via ticker, from 2026-03-09)
+kr_short_sale_daily: stock_id|"date"|short_sale_qty/value|short_sale_volume_ratio (*_value=원, 백만원 아님 — 억원은 /1e8)
+kr_stock_snapshots: ticker|"date"|market_cap(억원 — 시총 5,000억 이상은 >= 5000, 삼성전자 약 13,000,000)|listed_shares|kospi200_sector (join via ticker, from 2026-03-09)
 
 ## KR 주요 account (account_name은 영문코드 grs/lblt_rate 등 — 한글 LIKE 검색 금지, id 직접 사용)
 플로: 6592 매출 | 6597 영업이익 | 6603 순이익 | 6594 매출총이익 | 6590 ebitda | 6591 ev_ebitda | 6595 감가상각비(**99.99 더미, SELECT 금지. 역산: 6590-6597**)
