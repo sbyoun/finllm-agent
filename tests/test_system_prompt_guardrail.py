@@ -15,7 +15,7 @@ class AdviceGuardrailTest(unittest.TestCase):
 
     def test_guardrail_covers_observed_patterns(self):
         # 11/4–11/5 운영에서 실제로 나온 위반 유형
-        for phrase in ["너의 선택은", "일정표", "전량 매도", "체결 확률", "확인하지 못했다", "최종 투자 판단과 책임은 이용자 본인에게"]:
+        for phrase in ["너의 선택은", "일정표", "전량 매도", "체결 확률", "확인하지 못했다", "최종 투자 판단과 책임은 이용자 본인에게", "거절 문장을 쓰지 않는다", "가격대를 숫자로"]:
             self.assertIn(phrase, self.prompt, phrase)
 
 
