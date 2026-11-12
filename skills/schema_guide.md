@@ -65,7 +65,7 @@ cols: stock_id | "date" | foreign_net_qty/value | personal_net_qty/value | insti
 
 ### kr_program_trade_daily
 cols: stock_id | "date" | program_buy/sell/net_qty/value | program_net_qty/value_change | close | volume | price_change_pct
-*_value 단위: 백만원.
+*_value 단위: **원**(백만원 아님). 예: 삼성전자 2026-11-11 program_net_value = 488,053,168,900 = 약 4,881억 원. 억 원으로 보이려면 /1e8.
 
 ### kr_market_investor_daily
 cols: market_code | "date" | foreign_net_qty/value | personal_net_value | institution_net_value | close | price_change_pct
@@ -87,11 +87,12 @@ cols: stock_id | "date" | new_loan_qty | redeem_qty | remaining_qty | remaining_
 
 ### kr_short_sale_daily
 cols: stock_id | "date" | short_sale_qty/value | short_sale_volume_ratio | cumulative_short_sale_qty/value | short_sale_value_ratio
-*_value 단위: 백만원.
+*_value 단위: **원**(백만원 아님). 예: 삼성전자 2026-11-11 short_sale_value = 113,031,338,700 = 약 1,130억 원(= 공매도 수량 564,013주 × 종가). 억 원으로 보이려면 /1e8.
 
 ### kr_stock_snapshots
-cols: "date" | ticker | name | market | market_cap(백만원) | listed_shares | kospi200_sector | kospi100 | kospi50 | krx300 | kosdaq150 | market_cap_size | preferred | group_code
+cols: "date" | ticker | name | market | market_cap(**억원**, 백만원 아님) | listed_shares | kospi200_sector | kospi100 | kospi50 | krx300 | kosdaq150 | market_cap_size | preferred | group_code
 join: ticker → stocks.ticker. KOSPI200 편입 = kospi200_sector <> '0'. 데이터 시작: 2026-03-09.
+market_cap 예: 삼성전자 약 13,000,000 = 1,300조 원. **시총 5,000억 원 이상 → `market_cap >= 5000`, 1조 원 이상 → `>= 10000`.** (2026-11-10 단위를 백만원으로 착각해 `>= 500000`(=50조)으로 걸러 저평가 스크리닝이 0행이 됨)
 `group_code`: ST(주식) | EF(ETF, 1088) | EN(ETN) | RT(리츠) 등. ETF만 필요하면 `stocks.instrument_type='etf'` 쪽이 더 간단.
 
 ### us_stock_snapshots
