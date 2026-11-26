@@ -107,29 +107,6 @@ def _sanitize_assistant_message(content: str) -> str:
     return cleaned
 
 
-def _strip_markdown_tables(content: str) -> str:
-    """Remove markdown tables from assistant message when data panel will show the table."""
-    import re
-    lines = content.split("\n")
-    result: list[str] = []
-    in_table = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("|") and stripped.endswith("|"):
-            in_table = True
-            continue
-        if in_table and (not stripped or stripped.startswith("|")):
-            if stripped.startswith("|"):
-                continue
-            in_table = False
-            continue
-        in_table = False
-        result.append(line)
-    # Clean up multiple blank lines
-    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(result))
-    return cleaned.strip()
-
-
 @dataclass(slots=True)
 class RuntimeMessageContext:
     role: str
@@ -571,7 +548,6 @@ def _build_result(
             rows=last_backtest_obs.rows,
         )
         mode = "tool-result"
-        final_message = _strip_markdown_tables(final_message)
         datasets = [dataset]
         tool_request = RuntimeToolRequest(
             kind="backtest",
@@ -599,7 +575,6 @@ def _build_result(
             dataset = _build_dataset_from_sql(last_successful_sql_action, last_successful_sql_observation)
             sql = last_successful_sql_action.sql
             mode = "tool-result"
-            final_message = _strip_markdown_tables(final_message)
             tool_request = RuntimeToolRequest(
                 kind="sql",
                 sql=last_successful_sql_action.sql,
