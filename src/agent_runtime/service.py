@@ -51,6 +51,11 @@ _RAW_PRELUDE_RE = re.compile(
 )
 
 
+_IDENT = r"`[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\s*=\s*[0-9]+)?`"  # 밑줄이 든 소문자 식별자(선택: =숫자)
+_INTERNAL_IDENT_PAREN_RE = re.compile(rf"\s?\(\s*{_IDENT}(?:\s*[,·/]\s*{_IDENT})*\s*\)")
+_INTERNAL_IDENT_BARE_RE = re.compile(rf"\s?{_IDENT}(?=\s*(?:테이블|컬럼|칼럼))")
+
+
 def _sanitize_assistant_message(content: str) -> str:
     original = content
     removed: list[str] = []
@@ -85,6 +90,11 @@ def _sanitize_assistant_message(content: str) -> str:
         head, sep, tail = cleaned.partition("\n\n")
         removed.append(head)
         cleaned = tail.strip() if sep else ""
+
+    # 내부 DB 식별자(테이블·컬럼명, account_id=…)를 괄호+백틱으로 덧붙인 것을 지운다.
+    # 예: "투자자별 거래 실적 테이블(`kr_investor_trade_daily`)의" → "투자자별 거래 실적 테이블의" (2026-11-26 운영 답변)
+    cleaned = _INTERNAL_IDENT_PAREN_RE.sub("", cleaned)
+    cleaned = _INTERNAL_IDENT_BARE_RE.sub("", cleaned)
 
     if removed:
         _SANITIZE_LOGGER.warning(
