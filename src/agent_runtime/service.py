@@ -95,6 +95,38 @@ def _plain_math(content: str) -> str:
     return _MATH_INLINE_RE.sub(lambda m: _plain_math_expr(m.group(1)), content)
 
 
+# AI 가 리서치 주소를 지어내는 경우가 있다(/research/breakout-buying-reality 등, 30일 링크 24개 중 2개 → 404).
+# 실제 글 목록에 없는 주소면 링크만 떼고 글자는 남긴다. 목록을 못 불러오면 건드리지 않는다.
+_RESEARCH_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://(?:app\.|www\.)?foldalpha\.com(?:/en)?/research/([A-Za-z0-9_-]+)/?(?:[?#][^)\s]*)?)\)")
+
+
+def _known_research_slugs() -> set[str] | None:
+    try:
+        from agent_runtime.tool.research.search_research import _load_index
+
+        slugs = {str(a.get("slug") or "") for a in _load_index()}
+        slugs.discard("")
+        return slugs or None
+    except Exception:  # noqa: BLE001 — 목록 조회 실패가 답변을 막으면 안 된다
+        return None
+
+
+def _drop_unknown_research_links(content: str, slugs: set[str] | None = None) -> str:
+    if "/research/" not in content:
+        return content
+    known = slugs if slugs is not None else _known_research_slugs()
+    if not known:
+        return content
+
+    def _fix(match: re.Match[str]) -> str:
+        if match.group(3) in known:
+            return match.group(0)
+        _SANITIZE_LOGGER.warning("Dropped unknown research link: %s", match.group(2))
+        return match.group(1)
+
+    return _RESEARCH_LINK_RE.sub(_fix, content)
+
+
 def _sanitize_assistant_message(content: str) -> str:
     original = content
     removed: list[str] = []
@@ -135,6 +167,7 @@ def _sanitize_assistant_message(content: str) -> str:
     cleaned = _INTERNAL_IDENT_PAREN_RE.sub("", cleaned)
     cleaned = _INTERNAL_IDENT_BARE_RE.sub("", cleaned)
     cleaned = _plain_math(cleaned)
+    cleaned = _drop_unknown_research_links(cleaned)
 
     if removed:
         _SANITIZE_LOGGER.warning(

@@ -4,6 +4,7 @@ import unittest
 
 sys.modules.setdefault("oracledb", types.SimpleNamespace(connect=lambda **_: None))
 
+from agent_runtime.service import _drop_unknown_research_links as drop_links
 from agent_runtime.service import _sanitize_assistant_message as clean
 
 
@@ -40,6 +41,21 @@ class PlainMathTest(unittest.TestCase):
     def test_dollar_amounts_untouched(self):
         for s in ["엔비디아는 $120에서 $135로 올랐습니다.", "매출 $35.1B, EPS $0.81", "환율 1,400원/$ 기준 $100 = 14만 원"]:
             self.assertEqual(clean(s), s)
+
+
+class UnknownResearchLinkTest(unittest.TestCase):
+    KNOWN = {"foreign-flow-following", "institution-following"}
+
+    def test_drops_only_unknown(self):
+        src = "근거: ([외국인 따라사기](https://app.foldalpha.com/research/foreign-flow-following)), ([돌파 매수의 현실](https://app.foldalpha.com/research/breakout-buying-reality))"
+        self.assertEqual(
+            drop_links(src, self.KNOWN),
+            "근거: ([외국인 따라사기](https://app.foldalpha.com/research/foreign-flow-following)), (돌파 매수의 현실)",
+        )
+
+    def test_keeps_other_links_and_en(self):
+        for s in ["[기사](https://hankyung.com/research/abc)", "[EN](https://app.foldalpha.com/en/research/institution-following?x=1)", "[목록](https://app.foldalpha.com/research)"]:
+            self.assertEqual(drop_links(s, self.KNOWN), s)
 
 
 if __name__ == "__main__":
