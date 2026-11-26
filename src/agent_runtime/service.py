@@ -56,6 +56,45 @@ _INTERNAL_IDENT_PAREN_RE = re.compile(rf"\s?\(\s*{_IDENT}(?:\s*[,·/]\s*{_IDENT}
 _INTERNAL_IDENT_BARE_RE = re.compile(rf"\s?{_IDENT}(?=\s*(?:테이블|컬럼|칼럼))")
 
 
+# 웹에는 수식 렌더러가 없어 LaTeX 가 글자 그대로 보인다($$\\text{…} \\times …$$, 30일 193건 중 10건).
+# 수식 구간($$…$$, 역슬래시 명령이 든 $…$)만 일반 글자로 바꾼다. "$100" 같은 달러 표기는 건드리지 않는다.
+_MATH_BLOCK_RE = re.compile(r"\$\$(.+?)\$\$", re.S)
+_MATH_INLINE_RE = re.compile(r"\$([^$\n]*\\[A-Za-z%,;][^$\n]*)\$")
+_MATH_WRAP_RE = re.compile(r"\\(?:text|textbf|mathbf|mathrm|mathit|boldsymbol|operatorname)\s*\{([^{}]*)\}")
+_MATH_FRAC_RE = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
+_MATH_SYMBOLS = {
+    "times": "×", "div": "÷", "approx": "≈", "rightarrow": "→", "Rightarrow": "→", "to": "→", "leftarrow": "←",
+    "sim": "–", "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "neq": "≠", "ne": "≠", "pm": "±", "cdot": "·",
+    "Delta": "Δ", "sigma": "σ", "mu": "μ", "alpha": "α", "beta": "β", "sum": "Σ", "left": "", "right": "", "quad": " ", "qquad": " ",
+}
+_MATH_SYMBOL_RE = re.compile(r"\\(" + "|".join(sorted(_MATH_SYMBOLS, key=len, reverse=True)) + r")(?![A-Za-z])")
+
+
+def _plain_math_expr(expr: str) -> str:
+    def _frac(m: re.Match[str]) -> str:
+        num, den = m.group(1).strip(), m.group(2).strip()
+        wrap = lambda t: f"({t})" if re.search(r"\s[+\-×÷]\s", t) else t
+        return f"{wrap(num)} ÷ {wrap(den)}"
+
+    for _ in range(6):
+        new = _MATH_WRAP_RE.sub(lambda m: m.group(1), expr)
+        new = _MATH_SYMBOL_RE.sub(lambda m: _MATH_SYMBOLS[m.group(1)], new)
+        new = _MATH_FRAC_RE.sub(_frac, new)
+        if new == expr:
+            break
+        expr = new
+    expr = expr.replace("\\%", "%").replace("\\$", "$").replace("\\,", " ").replace("\\;", " ").replace("\\ ", " ")
+    expr = re.sub(r"\^\{([^{}]*)\}", r"^\1", expr)
+    return re.sub(r"[ \t]{2,}", " ", expr).strip()
+
+
+def _plain_math(content: str) -> str:
+    if "$" not in content or "\\" not in content and "$$" not in content:
+        return content
+    content = _MATH_BLOCK_RE.sub(lambda m: _plain_math_expr(m.group(1)), content)
+    return _MATH_INLINE_RE.sub(lambda m: _plain_math_expr(m.group(1)), content)
+
+
 def _sanitize_assistant_message(content: str) -> str:
     original = content
     removed: list[str] = []
@@ -95,6 +134,7 @@ def _sanitize_assistant_message(content: str) -> str:
     # 예: "투자자별 거래 실적 테이블(`kr_investor_trade_daily`)의" → "투자자별 거래 실적 테이블의" (2026-11-26 운영 답변)
     cleaned = _INTERNAL_IDENT_PAREN_RE.sub("", cleaned)
     cleaned = _INTERNAL_IDENT_BARE_RE.sub("", cleaned)
+    cleaned = _plain_math(cleaned)
 
     if removed:
         _SANITIZE_LOGGER.warning(
