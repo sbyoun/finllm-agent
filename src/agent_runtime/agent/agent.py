@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,14 @@ from agent_runtime.tool.news.search_news import SearchNewsAction, SearchNewsObse
 from agent_runtime.tool.portfolio.get_portfolio import GetPortfolioObservation
 from agent_runtime.tool.backtest.run_backtest import RunBacktestObservation
 from agent_runtime.tool.sql.run_sql import RunSQLAction, RunSQLObservation
+
+
+_TOOL_MARKER_RE = re.compile(r"^\s*\(이전 턴에 [\w.\-]+ 도구를 실행했습니다\)\s*$", re.MULTILINE)
+
+
+def _strip_tool_markers(text: str) -> str:
+    """대화 기록용 내부 표시 줄을 답변에서 지운다."""
+    return _TOOL_MARKER_RE.sub("", text).strip()
 
 
 def _tool_call_key(tool_call: LLMToolCall) -> str:
@@ -381,6 +390,17 @@ class Agent(AgentBase):
         llm_response = self.llm.completion(messages=messages, tools=llm_tools)
         message = self._extract_text_tool_calls(llm_response.message)
 
+        # 모델이 대화 기록 속 내부 표시 "(이전 턴에 … 도구를 실행했습니다)"(llm/gemini.py 가 지난 도구 호출을
+        # 산문으로 남긴 것)를 답변 자리에 따라 쓰는 경우가 있다(2026-11-19 운영: 답이 이 한 줄뿐이었다).
+        # 표시 줄은 항상 지우고, 지우고 나서 남는 게 없으면 도구를 부르려던 것이므로 도구를 준 채 한 번 더 받는다.
+        if not message.tool_calls and _strip_tool_markers(message.content or "") != (message.content or "").strip():
+            cleaned = _strip_tool_markers(message.content or "")
+            if not cleaned:
+                llm_response = self.llm.completion(messages=messages, tools=llm_tools)
+                message = self._extract_text_tool_calls(llm_response.message)
+                cleaned = _strip_tool_markers(message.content or "")
+            message.content = cleaned
+
         # Retry once on empty or incomplete response
         content_text = (message.content or "").strip()
         should_retry = (
@@ -394,6 +414,7 @@ class Agent(AgentBase):
             # Retry without tools to force a text answer (handles Gemini MALFORMED_FUNCTION_CALL)
             llm_response = self.llm.completion(messages=messages, tools=None)
             message = self._extract_text_tool_calls(llm_response.message)
+            message.content = _strip_tool_markers(message.content or "")
 
         if message.tool_calls:
             thought = message.content

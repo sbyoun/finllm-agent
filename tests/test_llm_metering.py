@@ -116,5 +116,13 @@ class RunRecordsUsageTest(unittest.TestCase):
         self.assertEqual(recorded[0]["source"], "telegram")
 
 
+class ToolMarkerStripTest(unittest.TestCase):
+    def test_strips_internal_marker_lines(self):
+        from agent_runtime.agent.agent import _strip_tool_markers
+        self.assertEqual(_strip_tool_markers("(이전 턴에 run_sql 도구를 실행했습니다)"), "")
+        self.assertEqual(_strip_tool_markers("(이전 턴에 run_sql 도구를 실행했습니다)\n세코닉스 종가는 1,000원입니다."), "세코닉스 종가는 1,000원입니다.")
+        self.assertEqual(_strip_tool_markers("본문 그대로"), "본문 그대로")
+
+
 if __name__ == "__main__":
     unittest.main()
